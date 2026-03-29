@@ -1,0 +1,30 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  
+  enable:
+    - errcheck
+    - gosimple
+    - govet
+    - ineffassign
+    - staticcheck
+    - typecheck
+    - unused
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+    gocritic:
+      enabled-checks:
+        - appendAssign
+        - argOrder
+        - badCond
+        - caseOrder
+        - dupArg
+        - dupBranchBody
+        - dupCase
