@@ -84,6 +84,34 @@ services:
 | `CLOUDFLARE_ZONE_ID` | The 32-character Zone ID for the target domain. |
 | `CLOUDFLARE_TARGET_DOMAIN` | The target destination. Use a CNAME (e.g., Argo Tunnel) or an IP address. |
 
+## 📦 Releases & Versioning
+
+This project follows [Semantic Versioning](https://semver.org/). Images are automatically built and pushed to **GitHub Container Registry (GHCR)** via GitHub Actions.
+
+| Tag | Usage | Stability |
+| :--- | :--- | :--- |
+| `latest` | Tracks the `main` branch. Use for testing new features. |  Experimental |
+| `stable` | Points to the most recent tagged release. |  Recommended |
+| `vX.Y.Z` | A specific immutable version (e.g., `v1.0.0`). |  Production |
+| `sha-xxxx` | Every commit generates a unique short-SHA tag. |  Debugging |
+
+To use the stable version in your `docker-compose.yml`:
+
+```yaml
+services:
+  companion:
+    image: ghcr.io/wolf-361/traefik-mesh-companion:stable
+    # ... rest of config
+```
+
+### 🏷️ How to Release
+To trigger a new stable build, simply tag your commit and push it:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
 ## Contributing
 
 The project utilizes a standard provider interface. To add support for additional DNS or VPN providers, implement the `DNSProvider` interface located in `internal/provider/` and submit a Pull Request.
