@@ -1,8 +1,8 @@
 # Traefik Mesh Companion
 
-![Docker Size](https://img.shields.io/badge/size-%3C10MB-blue)
-![Go Version](https://img.shields.io/badge/Go-1.23-00ADD8)
-![License](https://img.shields.io/badge/license-GPLv3-green)
+![Docker Size](https://img.shields.io/badge/size-10.2MB-blue)
+![Go Version](https://img.shields.io/badge/Go-1.26.1-00ADD8)
+![License](https://img.shields.io/badge/license-GNU%20GPLv3-green)
 
 Traefik Mesh Companion is a lightweight, automated DNS synchronizer for Traefik. It monitors the local Docker socket and synchronizes Traefik routing labels to external DNS providers and Mesh VPN networks.
 
