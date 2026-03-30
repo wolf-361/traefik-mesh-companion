@@ -19,6 +19,7 @@ The companion operates using a dual-pipeline architecture, allowing a single ins
 * **Label-Based Filtering:** Utilizes standard Traefik labels. No custom labels are required on your application containers.
 * **Extensible Provider Interface:** Modular Go architecture designed to support multiple DNS and VPN backends.
 * **Automated Lifecycle Management:** Creates records when containers start and removes stale records when containers are destroyed.
+* **Highly Optimized Execution:** Safely supports synchronization intervals as low as 60 seconds. The watcher engine employs in-memory state caching and pre-compiled regex filters. External APIs are only invoked if a true container state change is detected, eliminating unnecessary network calls and mitigating API rate-limiting risks.
 * **Low Resource Footprint:** Compiled as a static Go binary running in a scratch container.
 
 ## Quick Start (Docker Compose)
@@ -35,7 +36,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
       # --- Global Settings ---
-      - SYNC_INTERVAL=10m
+      - SYNC_INTERVAL=1m
 
       # --- Internal Pipeline (NetBird) ---
       - INTERNAL_PROVIDER=netbird
@@ -58,7 +59,7 @@ services:
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| `SYNC_INTERVAL` | `10m` | Interval for the full background synchronization loop. |
+| `SYNC_INTERVAL` | `1m` | Interval for the full background synchronization loop. |
 | `INTERNAL_PROVIDER` | `netbird` | Provider for the internal network. Set to `none` to disable. |
 | `INTERNAL_FILTER` | `traefik` | The Traefik entrypoint value that triggers an internal sync. |
 | `INTERNAL_FILTER_LABEL` | `traefik.http.routers.*.entrypoints` | The Traefik label pattern to monitor for the internal pipeline. |

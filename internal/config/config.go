@@ -30,8 +30,8 @@ type Config struct {
 func Load() *Config {
 	cfg := &Config{}
 
-	// Default to 10m if SYNC_INTERVAL is missing or invalid
-	cfg.SyncInterval = parseDuration(os.Getenv("SYNC_INTERVAL"), 10*time.Minute)
+	// Default to 1m if SYNC_INTERVAL is missing or invalid
+	cfg.SyncInterval = parseDuration(os.Getenv("SYNC_INTERVAL"), 1*time.Minute)
 
 	// Internal Pipeline: Defaults to NetBird enabled.
 	cfg.Internal.Provider = strings.ToLower(getEnvOrDefault("INTERNAL_PROVIDER", "netbird"))
