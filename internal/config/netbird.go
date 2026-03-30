@@ -9,16 +9,22 @@ import (
 type NetbirdConfig struct {
 	Token  string
 	APIURL string
-	Zone   string
 	Target string
 }
 
 // loadNetbirdConfig populates NetbirdConfig from environment variables.
 func loadNetbirdConfig() *NetbirdConfig {
+	token := os.Getenv("NETBIRD_API_TOKEN")
+	target := os.Getenv("NETBIRD_TARGET_IP")
+
+	// Return nil if core requirements are missing to skip provider initialization
+	if token == "" || target == "" {
+		return nil
+	}
+
 	return &NetbirdConfig{
-		Token:  os.Getenv("NETBIRD_API_TOKEN"),
+		Token:  token,
 		APIURL: strings.TrimRight(getEnvOrDefault("NETBIRD_API_URL", "https://api.netbird.io/api"), "/"),
-		Zone:   os.Getenv("NETBIRD_ZONE_NAME"),
-		Target: os.Getenv("NETBIRD_TARGET_IP"),
+		Target: target,
 	}
 }
