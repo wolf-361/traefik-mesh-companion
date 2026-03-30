@@ -18,6 +18,8 @@ type Pipeline struct {
 // Config is the main entrypoint for app settings.
 // Provider configs are pointers and will be nil if not in use.
 type Config struct {
+	LogLevel string
+
 	SyncInterval time.Duration
 	Internal     Pipeline
 	External     Pipeline
@@ -29,6 +31,8 @@ type Config struct {
 // Load reads environment variables and returns a populated Config.
 func Load() *Config {
 	cfg := &Config{}
+
+	cfg.LogLevel = getEnvOrDefault("LOG_LEVEL", "info")
 
 	// Default to 1m if SYNC_INTERVAL is missing or invalid
 	cfg.SyncInterval = parseDuration(os.Getenv("SYNC_INTERVAL"), 1*time.Minute)

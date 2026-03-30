@@ -42,9 +42,6 @@ go.work
 # End of https://www.toptal.com/developers/gitignore/api/go,git
 
 ### Custom Project Additions ###
-# Ignore the compiled project binaries
-companion
-traefik-mesh-companion
 
 # Local Environment Variables (CRITICAL to protect API tokens)
 .env

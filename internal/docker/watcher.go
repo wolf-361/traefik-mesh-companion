@@ -2,7 +2,7 @@ package docker
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"reflect"
 	"regexp"
 	"strings"
@@ -60,7 +60,7 @@ func NewWatcher(cfg *config.Config, providers map[string]provider.DNSProvider) (
 
 // Start begins listening to the Docker event stream and triggers background syncs.
 func (w *Watcher) Start() {
-	log.Println("[Docker] Starting socket watcher...")
+	slog.Info("Starting Docker socket watcher...")
 
 	w.SyncAll()
 
@@ -78,12 +78,16 @@ func (w *Watcher) Start() {
 	for {
 		select {
 		case err := <-errs:
-			log.Printf("[Docker] Event stream error: %v", err)
-			time.Sleep(5 * time.Second)
+			slog.Error("Docker event stream error", "error", err)
+			time.Sleep(5 * time.Second) // Backoff
 		case msg := <-msgs:
-			log.Printf("[Docker] Container '%s' triggered '%s'. Synchronizing pipelines...", msg.Actor.Attributes["name"], msg.Action)
+			slog.Info("Container event triggered sync",
+				"container", msg.Actor.Attributes["name"],
+				"action", msg.Action,
+			)
 			w.SyncAll()
 		case <-ticker.C:
+			slog.Debug("Running scheduled background synchronization...")
 			w.SyncAll()
 		}
 	}
@@ -93,7 +97,7 @@ func (w *Watcher) Start() {
 func (w *Watcher) SyncAll() {
 	containers, err := w.cli.ContainerList(context.Background(), types.ContainerListOptions{All: true})
 	if err != nil {
-		log.Printf("[Docker] Error listing containers: %v", err)
+		slog.Error("Error listing containers", "error", err)
 		return
 	}
 
@@ -165,12 +169,12 @@ func (w *Watcher) extractDomains(rule string, regex *regexp.Regexp, targetMap ma
 func (w *Watcher) dispatch(providerName string, hosts map[string]bool, targetIP string) {
 	prov, exists := w.providers[providerName]
 	if !exists {
-		log.Printf("[Warning] Provider '%s' is enabled but not initialized in registry.", providerName)
+		slog.Warn("Provider is enabled but not initialized in registry", "provider", providerName)
 		return
 	}
 
-	log.Printf("[%s] Synchronizing %d discovered hosts...", strings.ToUpper(providerName), len(hosts))
+	slog.Info("Synchronizing discovered hosts", "provider", providerName, "host_count", len(hosts))
 	if err := prov.Sync(hosts, targetIP); err != nil {
-		log.Printf("[%s] Synchronization failed: %v", strings.ToUpper(providerName), err)
+		slog.Error("Synchronization failed", "provider", providerName, "error", err)
 	}
 }
