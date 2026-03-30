@@ -13,6 +13,11 @@ import (
 	"github.com/wolf-361/traefik-mesh-companion/internal/config"
 )
 
+const (
+	// Base URL for the Cloudflare API
+	cloudflareAPIBase = "https://api.cloudflare.com/client/v4"
+)
+
 type CloudflareProvider struct {
 	client *http.Client
 	cfg    *config.Config
@@ -52,7 +57,7 @@ func (c *CloudflareProvider) Sync(activeHosts map[string]bool, target string) er
 		recordType = "A"
 	}
 
-	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/dns_records?per_page=100", c.cfg.Cloudflare.ZoneID)
+	url := fmt.Sprintf("%s/zones/%s/dns_records?per_page=100", cloudflareAPIBase, c.cfg.Cloudflare.ZoneID)
 	req, _ := http.NewRequest(http.MethodGet, url, nil)
 	req.Header.Add("Authorization", "Bearer "+c.cfg.Cloudflare.Token)
 
@@ -101,7 +106,7 @@ func (c *CloudflareProvider) upsertRecord(method, recordID, host, target, record
 	}
 	body, _ := json.Marshal(rec)
 
-	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/dns_records", c.cfg.Cloudflare.ZoneID)
+	url := fmt.Sprintf("%s/zones/%s/dns_records", cloudflareAPIBase, c.cfg.Cloudflare.ZoneID)
 	if method == http.MethodPut {
 		url = fmt.Sprintf("%s/%s", url, recordID)
 	}
