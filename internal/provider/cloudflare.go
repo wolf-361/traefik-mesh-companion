@@ -58,17 +58,29 @@ func (c *CloudflareProvider) Sync(activeHosts map[string]bool, target string) er
 	}
 
 	url := fmt.Sprintf("%s/zones/%s/dns_records?per_page=100", cloudflareAPIBase, c.cfg.Cloudflare.ZoneID)
-	req, _ := http.NewRequest(http.MethodGet, url, nil)
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
 	req.Header.Add("Authorization", "Bearer "+c.cfg.Cloudflare.Token)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to fetch records: %w", err)
 	}
-	defer resp.Body.Close()
+
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("failed to close response body", "error", closeErr)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return fmt.Errorf("cloudflare API returned status %d and failed to read body: %w", resp.StatusCode, readErr)
+		}
 		return fmt.Errorf("cloudflare API returned status %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -104,14 +116,23 @@ func (c *CloudflareProvider) upsertRecord(method, recordID, host, target, record
 		Proxied: true, // Force Cloudflare Proxy for all external routing
 		TTL:     1,    // 1 indicates 'Auto' in Cloudflare
 	}
-	body, _ := json.Marshal(rec)
+
+	body, err := json.Marshal(rec)
+	if err != nil {
+		slog.Error("Failed to marshal Cloudflare record", "host", host, "error", err)
+		return
+	}
 
 	url := fmt.Sprintf("%s/zones/%s/dns_records", cloudflareAPIBase, c.cfg.Cloudflare.ZoneID)
 	if method == http.MethodPut {
 		url = fmt.Sprintf("%s/%s", url, recordID)
 	}
 
-	req, _ := http.NewRequest(method, url, bytes.NewBuffer(body))
+	req, err := http.NewRequest(method, url, bytes.NewBuffer(body))
+	if err != nil {
+		slog.Error("Failed to create Cloudflare request", "host", host, "error", err)
+		return
+	}
 	req.Header.Add("Authorization", "Bearer "+c.cfg.Cloudflare.Token)
 	req.Header.Add("Content-Type", "application/json")
 
@@ -140,6 +161,8 @@ func (c *CloudflareProvider) upsertRecord(method, recordID, host, target, record
 	}
 
 	if resp != nil {
-		resp.Body.Close()
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("failed to close response body", "error", closeErr)
+		}
 	}
 }

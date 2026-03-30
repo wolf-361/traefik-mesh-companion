@@ -50,10 +50,18 @@ func (n *NetbirdProvider) Init(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("failed to connect to NetBird API: %w", err)
 	}
-	defer resp.Body.Close()
+
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("failed to close response body", "error", closeErr)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return fmt.Errorf("netbird API returned status %d and failed to read body: %w", resp.StatusCode, readErr)
+		}
 		return fmt.Errorf("netbird API returned status %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -75,14 +83,22 @@ func (n *NetbirdProvider) Init(cfg *config.Config) error {
 
 // Sync ensures the NetBird records perfectly match the active internal Traefik containers.
 func (n *NetbirdProvider) Sync(activeHosts map[string]bool, targetIP string) error {
-	req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/dns/zones/%s/records", n.cfg.Netbird.APIURL, n.zoneID), nil)
+	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/dns/zones/%s/records", n.cfg.Netbird.APIURL, n.zoneID), nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
 	req.Header.Add("Authorization", "Token "+n.cfg.Netbird.Token)
 
 	resp, err := n.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to fetch records: %w", err)
 	}
-	defer resp.Body.Close()
+
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("failed to close response body", "error", closeErr)
+		}
+	}()
 
 	var currentRecords []netbirdRecord
 	if err := json.NewDecoder(resp.Body).Decode(&currentRecords); err != nil {
@@ -110,14 +126,23 @@ func (n *NetbirdProvider) Sync(activeHosts map[string]bool, targetIP string) err
 
 func (n *NetbirdProvider) upsertRecord(method, recordID, host, ip string) {
 	rec := netbirdRecord{Name: host, Type: "A", Content: ip, TTL: 300}
-	body, _ := json.Marshal(rec)
+
+	body, err := json.Marshal(rec)
+	if err != nil {
+		slog.Error("Failed to marshal NetBird record", "host", host, "error", err)
+		return
+	}
 
 	url := fmt.Sprintf("%s/dns/zones/%s/records", n.cfg.Netbird.APIURL, n.zoneID)
 	if method == http.MethodPut {
 		url = fmt.Sprintf("%s/%s", url, recordID)
 	}
 
-	req, _ := http.NewRequest(method, url, bytes.NewBuffer(body))
+	req, err := http.NewRequest(method, url, bytes.NewBuffer(body))
+	if err != nil {
+		slog.Error("Failed to create NetBird request", "host", host, "error", err)
+		return
+	}
 	req.Header.Add("Authorization", "Token "+n.cfg.Netbird.Token)
 	req.Header.Add("Content-Type", "application/json")
 
@@ -145,6 +170,8 @@ func (n *NetbirdProvider) upsertRecord(method, recordID, host, ip string) {
 	}
 
 	if resp != nil {
-		resp.Body.Close()
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("failed to close response body", "error", closeErr)
+		}
 	}
 }
