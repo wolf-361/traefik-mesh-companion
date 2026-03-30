@@ -29,7 +29,7 @@ Deploy the companion as a sidecar alongside your Traefik instance. The following
 ```yaml
 services:
   mesh-companion:
-    image: ghcr.io/wolf361/traefik-mesh-companion:latest
+    image: ghcr.io/wolf-361/traefik-mesh-companion:stable
     container_name: traefik-mesh-companion
     restart: unless-stopped
     volumes:
