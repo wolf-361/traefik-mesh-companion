@@ -8,7 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/client"
 	"github.com/wolf-361/traefik-mesh-companion/internal/config"
@@ -73,7 +74,7 @@ func (w *Watcher) Start() {
 	eventFilter.Add("event", "die")
 	eventFilter.Add("event", "destroy")
 
-	msgs, errs := w.cli.Events(context.Background(), types.EventsOptions{Filters: eventFilter})
+	msgs, errs := w.cli.Events(context.Background(), events.ListOptions{Filters: eventFilter})
 
 	for {
 		select {
@@ -95,7 +96,7 @@ func (w *Watcher) Start() {
 
 // SyncAll scans all containers, evaluates Traefik labels, and dispatches to providers if state changed.
 func (w *Watcher) SyncAll() {
-	containers, err := w.cli.ContainerList(context.Background(), types.ContainerListOptions{All: true})
+	containers, err := w.cli.ContainerList(context.Background(), container.ListOptions{All: true})
 	if err != nil {
 		slog.Error("Error listing containers", "error", err)
 		return

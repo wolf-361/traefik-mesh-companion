@@ -52,3 +52,6 @@ go.work
 .vscode/
 *.swp
 *.swo
+
+# Compiled
+bin
