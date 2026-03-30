@@ -5,7 +5,7 @@ run:
 
 linters:
   default: none
-  
+
   enable:
     - errcheck
     - gosimple
