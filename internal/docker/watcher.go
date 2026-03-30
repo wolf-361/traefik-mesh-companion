@@ -94,7 +94,7 @@ func (w *Watcher) Start() {
 	}
 }
 
-// SyncAll scans all containers, evaluates Traefik labels, and dispatches to providers if state changed.
+// SyncAll scans all containers, groups labels by router, and evaluates them strictly.
 func (w *Watcher) SyncAll() {
 	containers, err := w.cli.ContainerList(context.Background(), container.ListOptions{All: true})
 	if err != nil {
@@ -106,44 +106,69 @@ func (w *Watcher) SyncAll() {
 	externalHosts := make(map[string]bool)
 
 	for _, c := range containers {
+		// Only process containers explicitly enabled for Traefik
 		if c.Labels["traefik.enable"] != "true" {
 			continue
 		}
 
-		internalRouters := make(map[string]bool)
-		externalRouters := make(map[string]bool)
+		// Step 1: Group labels by Router Name for this specific container.
+		// This prevents "Router A" labels from affecting "Router B" sync logic.
+		type routerData struct {
+			rule        string
+			filterValue string
+		}
+		routers := make(map[string]*routerData)
 
 		for key, val := range c.Labels {
-			if w.cfg.Internal.Enabled && w.internalRegex != nil {
-				matches := w.internalRegex.FindStringSubmatch(key)
-				if len(matches) > 1 && strings.Contains(val, w.cfg.Internal.FilterValue) {
-					internalRouters[matches[1]] = true
-				}
+			if !strings.HasPrefix(key, "traefik.http.routers.") {
+				continue
 			}
 
-			if w.cfg.External.Enabled && w.externalRegex != nil {
-				matches := w.externalRegex.FindStringSubmatch(key)
-				if len(matches) > 1 && strings.Contains(val, w.cfg.External.FilterValue) {
-					externalRouters[matches[1]] = true
-				}
+			// Extract router name and the specific property (e.g., "rule" or "entrypoints")
+			parts := strings.Split(strings.TrimPrefix(key, "traefik.http.routers."), ".")
+			if len(parts) < 2 {
+				continue
+			}
+			name := parts[0]
+			property := parts[1]
+
+			if _, exists := routers[name]; !exists {
+				routers[name] = &routerData{}
+			}
+
+			if property == "rule" {
+				routers[name].rule = val
+			}
+
+			// Check if this label is our designated filter label (e.g. "entrypoints")
+			if w.cfg.Internal.Enabled && w.internalRegex.MatchString(key) {
+				routers[name].filterValue = val
+			} else if w.cfg.External.Enabled && w.externalRegex.MatchString(key) {
+				// We prioritize the external filter if the labels match both for some reason
+				routers[name].filterValue = val
 			}
 		}
 
-		for key, val := range c.Labels {
-			for routerName := range internalRouters {
-				if key == "traefik.http.routers."+routerName+".rule" && w.hostRegex.MatchString(val) {
-					w.extractDomains(val, w.hostRegex, internalHosts)
-				}
+		// Step 2: Evaluate each router independently
+		for _, data := range routers {
+			if data.rule == "" {
+				continue
 			}
-			for routerName := range externalRouters {
-				if key == "traefik.http.routers."+routerName+".rule" && w.hostRegex.MatchString(val) {
-					w.extractDomains(val, w.hostRegex, externalHosts)
-				}
+
+			// Internal Sync Check
+			if w.cfg.Internal.Enabled && strings.Contains(data.filterValue, w.cfg.Internal.FilterValue) {
+				w.extractDomains(data.rule, internalHosts)
+			}
+
+			// External Sync Check
+			// Note: If Coolify has 'internal' and your filter is 'https', this will now correctly return false.
+			if w.cfg.External.Enabled && strings.Contains(data.filterValue, w.cfg.External.FilterValue) {
+				w.extractDomains(data.rule, externalHosts)
 			}
 		}
 	}
 
-	// Dispatch ONLY if the maps have changed since the last run
+	// Step 3: Dispatch ONLY if state changed to prevent API rate limiting
 	if w.cfg.Internal.Enabled && !reflect.DeepEqual(w.lastInternalHosts, internalHosts) {
 		w.dispatch(w.cfg.Internal.Provider, internalHosts, w.cfg.Netbird.Target)
 		w.lastInternalHosts = internalHosts
@@ -155,13 +180,19 @@ func (w *Watcher) SyncAll() {
 	}
 }
 
-// extractDomains parses comma-separated domains from a Traefik Host() rule and adds them to the target map.
-func (w *Watcher) extractDomains(rule string, regex *regexp.Regexp, targetMap map[string]bool) {
-	matches := regex.FindStringSubmatch(rule)
-	if len(matches) > 1 {
-		domains := strings.Split(matches[1], ",")
-		for _, domain := range domains {
-			targetMap[strings.TrimSpace(domain)] = true
+// extractDomains uses FindAllStringSubmatch to catch ALL domains in a rule like Host(`a.com`, `b.com`)
+func (w *Watcher) extractDomains(rule string, targetMap map[string]bool) {
+	matches := w.hostRegex.FindAllStringSubmatch(rule, -1)
+	for _, match := range matches {
+		if len(match) > 1 {
+			// Split by comma in case of Host(`a.com, b.com`)
+			domains := strings.Split(match[1], ",")
+			for _, domain := range domains {
+				cleanDomain := strings.Trim(strings.TrimSpace(domain), "`'\"")
+				if cleanDomain != "" {
+					targetMap[cleanDomain] = true
+				}
+			}
 		}
 	}
 }
