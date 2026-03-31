@@ -195,13 +195,13 @@ func (n *NetbirdProvider) syncZone(zoneID string, activeHosts map[string]bool, i
 // upsertRecord handles the physical POST/PUT request to the NetBird API to create or update a record.
 func (n *NetbirdProvider) upsertRecord(method, recordID, host, ip, zoneID string) {
 	if n.cfg.DryRun {
-        action := "Create"
-        if method == http.MethodPut {
-            action = "Update"
-        }
-        slog.Info("[DRY RUN] Would sync NetBird record", "action", action, "host", host, "target", ip)
-        return
-    }
+		action := "Create"
+		if method == http.MethodPut {
+			action = "Update"
+		}
+		slog.Info("[DRY RUN] Would sync NetBird record", "action", action, "host", host, "target", ip)
+		return
+	}
 
 	rec := netbirdRecord{
 		Name:    host,
@@ -254,9 +254,9 @@ func (n *NetbirdProvider) upsertRecord(method, recordID, host, ip, zoneID string
 // deleteRecord handles the DELETE request to remove an orphaned record.
 func (n *NetbirdProvider) deleteRecord(recordID, host, zoneID string) {
 	if n.cfg.DryRun {
-        slog.Info("[DRY RUN] Would delete orphaned NetBird record", "host", host)
-        return
-    }
+		slog.Info("[DRY RUN] Would delete orphaned NetBird record", "host", host)
+		return
+	}
 
 	url := fmt.Sprintf("%s/dns/zones/%s/records/%s", n.cfg.Netbird.APIURL, zoneID, recordID)
 
