@@ -160,7 +160,8 @@ func (w *Watcher) SyncAll() {
 
 			isManaged := data.managed != "false"
 
-			if w.cfg.Internal.Enabled && strings.Contains(data.internalFilterVal, w.cfg.Internal.FilterValue) {
+			// Use the new matchFilter helper for both internal and external evaluations
+			if w.cfg.Internal.Enabled && matchFilter(data.internalFilterVal, w.cfg.Internal.FilterValue) {
 				if isManaged {
 					w.extractDomains(data.rule, internalHosts)
 				} else {
@@ -168,7 +169,7 @@ func (w *Watcher) SyncAll() {
 				}
 			}
 
-			if w.cfg.External.Enabled && strings.Contains(data.externalFilterVal, w.cfg.External.FilterValue) {
+			if w.cfg.External.Enabled && matchFilter(data.externalFilterVal, w.cfg.External.FilterValue) {
 				if isManaged {
 					w.extractDomains(data.rule, externalHosts)
 				} else {
@@ -209,6 +210,17 @@ func (w *Watcher) extractDomains(rule string, targetMap map[string]bool) {
 			}
 		}
 	}
+}
+
+// matchFilter checks if a Traefik label contains ANY of the comma-separated filter values
+func matchFilter(labelValue string, envFilter string) bool {
+	for _, f := range strings.Split(envFilter, ",") {
+		cleanFilter := strings.TrimSpace(f)
+		if cleanFilter != "" && strings.Contains(labelValue, cleanFilter) {
+			return true
+		}
+	}
+	return false
 }
 
 // dispatch sends the mapped hosts to the appropriate DNS provider for synchronization.
