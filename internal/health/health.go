@@ -24,7 +24,7 @@ func NewServer() *Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc(Path, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
+		_, _ = w.Write([]byte("OK"))
 	})
 
 	return &Server{
@@ -58,7 +58,9 @@ func Check() error {
 	if err != nil {
 		return fmt.Errorf("healthcheck failed to connect: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("healthcheck returned unexpected status: %d", resp.StatusCode)
