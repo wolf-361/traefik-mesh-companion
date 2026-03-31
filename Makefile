@@ -9,9 +9,9 @@ help: ## Show this help message
 
 all: tidy fmt lint test build ## Run tidy, formatting, linting, tests, and build
 
-init: ## Initialize the project (setup git hooks)
-	@echo "=> Configuring git hooks..."
-	@git config core.hooksPath .githooks || echo "No .githooks directory found"
+init: ## Configure git to use the version-controlled hooks directory
+	@git config core.hooksPath .githooks
+	@chmod +x .githooks/*
 	@echo "=> Git hooks configured successfully!"
 
 tidy: ## Clean up and verify Go modules
