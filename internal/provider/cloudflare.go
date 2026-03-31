@@ -124,21 +124,25 @@ func (c *CloudflareProvider) syncZone(ctx context.Context, zoneID string, active
 			if rec.Name == host {
 				exists = true
 				if rec.Content != target || rec.Type != recordType {
-					// Update existing record
-					params := cloudflare.UpdateDNSRecordParams{
-						ID:      rec.ID,
-						Type:    recordType,
-						Name:    host,
-						Content: target,
-						Proxied: &proxied,
-						TTL:     1, // 1 means 'Auto' in Cloudflare
-					}
-
-					_, err := c.api.UpdateDNSRecord(ctx, rc, params)
-					if err != nil {
-						slog.Error("Failed to update Cloudflare record", "host", host, "error", err)
+					if c.cfg.DryRun {
+						slog.Info("[DRY RUN] Would update Cloudflare record", "host", host, "target", target, "type", recordType)
 					} else {
-						slog.Info("Synced Cloudflare record", "action", "Updated", "type", recordType, "host", host, "target", target)
+						// Update existing record
+						params := cloudflare.UpdateDNSRecordParams{
+							ID:      rec.ID,
+							Type:    recordType,
+							Name:    host,
+							Content: target,
+							Proxied: &proxied,
+							TTL:     1, // 1 means 'Auto' in Cloudflare
+						}
+
+						_, err := c.api.UpdateDNSRecord(ctx, rc, params)
+						if err != nil {
+							slog.Error("Failed to update Cloudflare record", "host", host, "error", err)
+						} else {
+							slog.Info("Synced Cloudflare record", "action", "Updated", "type", recordType, "host", host, "target", target)
+						}
 					}
 				}
 				break
@@ -146,20 +150,24 @@ func (c *CloudflareProvider) syncZone(ctx context.Context, zoneID string, active
 		}
 
 		if !exists {
-			// Create new record
-			params := cloudflare.CreateDNSRecordParams{
-				Type:    recordType,
-				Name:    host,
-				Content: target,
-				Proxied: &proxied,
-				TTL:     1,
-			}
-
-			_, err := c.api.CreateDNSRecord(ctx, rc, params)
-			if err != nil {
-				slog.Error("Failed to create Cloudflare record", "host", host, "error", err)
+			if c.cfg.DryRun {
+				slog.Info("[DRY RUN] Would create Cloudflare record", "host", host, "target", target, "type", recordType)
 			} else {
-				slog.Info("Synced Cloudflare record", "action", "Created", "type", recordType, "host", host, "target", target)
+				// Create new record
+				params := cloudflare.CreateDNSRecordParams{
+					Type:    recordType,
+					Name:    host,
+					Content: target,
+					Proxied: &proxied,
+					TTL:     1,
+				}
+
+				_, err := c.api.CreateDNSRecord(ctx, rc, params)
+				if err != nil {
+					slog.Error("Failed to create Cloudflare record", "host", host, "error", err)
+				} else {
+					slog.Info("Synced Cloudflare record", "action", "Created", "type", recordType, "host", host, "target", target)
+				}
 			}
 		}
 	}
@@ -170,11 +178,15 @@ func (c *CloudflareProvider) syncZone(ctx context.Context, zoneID string, active
 			if !activeHosts[rec.Name] && !ignoredHosts[rec.Name] {
 				// SAFETY LOCK: Only delete if pointing to our specific target (UUID.cfargotunnel.com)
 				if rec.Content == target && rec.Type == recordType {
-					err := c.api.DeleteDNSRecord(ctx, rc, rec.ID)
-					if err != nil {
-						slog.Error("Failed to delete orphaned Cloudflare record", "host", rec.Name, "error", err)
+					if c.cfg.DryRun {
+						slog.Info("[DRY RUN] Would delete orphaned Cloudflare record", "host", rec.Name)
 					} else {
-						slog.Info("Cleaned up orphaned Cloudflare record", "host", rec.Name)
+						err := c.api.DeleteDNSRecord(ctx, rc, rec.ID)
+						if err != nil {
+							slog.Error("Failed to delete orphaned Cloudflare record", "host", rec.Name, "error", err)
+						} else {
+							slog.Info("Cleaned up orphaned Cloudflare record", "host", rec.Name)
+						}
 					}
 				}
 			}

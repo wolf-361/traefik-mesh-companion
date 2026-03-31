@@ -20,6 +20,7 @@ type Pipeline struct {
 // Provider configs are pointers and will be nil if not in use.
 type Config struct {
 	LogLevel string
+	DryRun   bool
 
 	SyncInterval time.Duration
 	Internal     Pipeline
@@ -34,6 +35,7 @@ func Load() *Config {
 	cfg := &Config{}
 
 	cfg.LogLevel = getEnvOrDefault("LOG_LEVEL", "info")
+	cfg.DryRun = strings.ToLower(os.Getenv("DRY_RUN")) == "true"
 
 	// Default to 1m if SYNC_INTERVAL is missing or invalid
 	cfg.SyncInterval = parseDuration(os.Getenv("SYNC_INTERVAL"), 1*time.Minute)
