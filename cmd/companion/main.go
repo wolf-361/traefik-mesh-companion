@@ -1,14 +1,19 @@
 package main
 
 import (
+	"context"
+	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/wolf-361/traefik-mesh-companion/internal/config"
 	"github.com/wolf-361/traefik-mesh-companion/internal/docker"
+	"github.com/wolf-361/traefik-mesh-companion/internal/health"
 	"github.com/wolf-361/traefik-mesh-companion/internal/provider"
 )
 
@@ -35,6 +40,17 @@ func setupLogger(level string) {
 }
 
 func main() {
+	isHealthCheck := flag.Bool("health", false, "Run health check against the companion")
+	flag.Parse()
+
+	if *isHealthCheck {
+		if err := health.Check(); err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
 	cfg := config.Load()
 
 	setupLogger(cfg.LogLevel)
@@ -78,6 +94,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	healthServer := health.NewServer()
+	go func() {
+		slog.Debug("Starting background health server", "port", health.Port)
+		if err := healthServer.Start(); err != nil {
+			slog.Error("Health server crashed", "error", err)
+		}
+	}()
+
 	go watcher.Start()
 
 	// Graceful Shutdown Trap
@@ -87,4 +111,10 @@ func main() {
 	<-stopChan
 
 	slog.Info("Shutting down Traefik Mesh Companion safely...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := healthServer.Stop(ctx); err != nil {
+		slog.Error("Failed to stop health server cleanly", "error", err)
+	}
 }
