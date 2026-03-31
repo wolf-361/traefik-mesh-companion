@@ -13,6 +13,7 @@ type Pipeline struct {
 	Provider    string
 	FilterLabel string
 	FilterValue string // Supports comma-separated values (e.g., "internal,https")
+	Cleanup     bool
 }
 
 // Config is the main entrypoint for app settings.
@@ -42,12 +43,14 @@ func Load() *Config {
 	cfg.Internal.Enabled = cfg.Internal.Provider != "none"
 	cfg.Internal.FilterLabel = getEnvOrDefault("INTERNAL_FILTER_LABEL", "traefik.http.routers.*.entrypoints")
 	cfg.Internal.FilterValue = getEnvOrDefault("INTERNAL_FILTER", "traefik")
+	cfg.Internal.Cleanup = strings.ToLower(os.Getenv("INTERNAL_CLEANUP")) == "true"
 
 	// External Pipeline: Defaults to Disabled.
 	cfg.External.Provider = strings.ToLower(getEnvOrDefault("EXTERNAL_PROVIDER", "none"))
 	cfg.External.Enabled = cfg.External.Provider != "none"
 	cfg.External.FilterLabel = getEnvOrDefault("EXTERNAL_FILTER_LABEL", "traefik.http.routers.*.entrypoints")
 	cfg.External.FilterValue = getEnvOrDefault("EXTERNAL_FILTER", "https")
+	cfg.External.Cleanup = strings.ToLower(os.Getenv("EXTERNAL_CLEANUP")) == "true"
 
 	// Only load provider details if they are referenced in a pipeline
 	if cfg.isProviderUsed("netbird") {

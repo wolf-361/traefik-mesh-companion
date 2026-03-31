@@ -17,12 +17,3 @@ linters:
     errcheck:
       check-type-assertions: true
       check-blank: false
-    gocritic:
-      enabled-checks:
-        - appendAssign
-        - argOrder
-        - badCond
-        - caseOrder
-        - dupArg
-        - dupBranchBody
-        - dupCase

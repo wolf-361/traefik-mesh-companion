@@ -1,133 +1,103 @@
 package provider
 
 import (
-	"bytes"
-	"encoding/json"
+	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
-	"net/http"
 	"strings"
-	"time"
 
+	"github.com/cloudflare/cloudflare-go"
 	"github.com/wolf-361/traefik-mesh-companion/internal/config"
 )
 
-const (
-	// Base URL for the Cloudflare API
-	cloudflareAPIBase = "https://api.cloudflare.com/client/v4"
-)
-
+// CloudflareProvider manages DNS records via the official Cloudflare Go SDK.
 type CloudflareProvider struct {
-	client  *http.Client
+	api     *cloudflare.API
 	cfg     *config.Config
 	zoneMap map[string]string // Maps root domain (e.g., "wolf-361.ca") to its Zone ID
 }
 
-type cfZone struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-}
-
-type cfZonesResponse struct {
-	Success bool     `json:"success"`
-	Result  []cfZone `json:"result"`
-}
-
-type cfRecord struct {
-	ID      string `json:"id,omitempty"`
-	Name    string `json:"name"`
-	Type    string `json:"type"`
-	Content string `json:"content"`
-	Proxied bool   `json:"proxied"`
-	TTL     int    `json:"ttl"`
-}
-
-type cfRecordsResponse struct {
-	Success bool       `json:"success"`
-	Result  []cfRecord `json:"result"`
-}
-
-// Init sets up the HTTP client and dynamically fetches all available Cloudflare Zones.
+// Init sets up the Cloudflare SDK client and dynamically fetches all available zones.
 func (c *CloudflareProvider) Init(cfg *config.Config) error {
 	c.cfg = cfg
-	c.client = &http.Client{Timeout: 10 * time.Second}
 	c.zoneMap = make(map[string]string)
 
 	if c.cfg.Cloudflare == nil {
 		return fmt.Errorf("cloudflare configuration is missing but provider was initialized")
 	}
 
-	// Dynamically fetch all zones associated with this API Token
-	url := fmt.Sprintf("%s/zones?per_page=50", cloudflareAPIBase)
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	var err error
+	// Initialize the official Cloudflare API client
+	c.api, err = cloudflare.NewWithAPIToken(c.cfg.Cloudflare.Token)
 	if err != nil {
-		return fmt.Errorf("failed to create zones request: %w", err)
+		return fmt.Errorf("failed to initialize cloudflare client: %w", err)
 	}
-	req.Header.Add("Authorization", "Bearer "+c.cfg.Cloudflare.Token)
 
-	resp, err := c.client.Do(req)
+	// Fetch all zones associated with this API Token
+	ctx := context.Background()
+	zones, err := c.api.ListZones(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to fetch zones: %w", err)
-	}
-	defer func() {
-		if closeErr := resp.Body.Close(); closeErr != nil {
-			slog.Debug("failed to close response body", "error", closeErr)
-		}
-	}()
-
-	if resp.StatusCode != http.StatusOK {
-		body, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			return fmt.Errorf("cloudflare API returned status %d and failed to read body: %w", resp.StatusCode, readErr)
-		}
-		return fmt.Errorf("cloudflare API returned status %d: %s", resp.StatusCode, string(body))
-	}
-
-	var zResp cfZonesResponse
-	if err := json.NewDecoder(resp.Body).Decode(&zResp); err != nil {
-		return fmt.Errorf("failed to decode zones JSON: %w", err)
+		return fmt.Errorf("failed to fetch zones from cloudflare: %w", err)
 	}
 
 	// Build the mapping dictionary in memory
 	var loadedDomains []string
-	for _, z := range zResp.Result {
+	for _, z := range zones {
 		c.zoneMap[z.Name] = z.ID
 		loadedDomains = append(loadedDomains, z.Name)
 	}
 
-	slog.Info("Initialized Cloudflare Provider with auto-discovery", "discovered_zones", len(loadedDomains), "domains", loadedDomains)
+	slog.Info("Initialized Cloudflare Provider with SDK", "discovered_zones", len(loadedDomains), "domains", loadedDomains)
 	return nil
 }
 
 // Sync ensures Cloudflare records match the active external Traefik containers.
-func (c *CloudflareProvider) Sync(activeHosts map[string]bool, target string) error {
+func (c *CloudflareProvider) Sync(activeHosts map[string]bool, ignoredHosts map[string]bool, target string, cleanup bool) error {
 	recordType := "CNAME"
-	if net.ParseIP(target) != nil {
+	if net.ParseIP(target) != nil { // Use A records for IP's
 		recordType = "A"
 	}
 
-	// Step 1: Group the active Traefik hosts by their respective Cloudflare Zone
-	hostsByZone := make(map[string][]string)
-	for host := range activeHosts {
-		matched := false
-		for domain, zoneID := range c.zoneMap {
-			// Match exact domain (wolf-361.ca) or subdomain (app.wolf-361.ca) safely
-			if host == domain || strings.HasSuffix(host, "."+domain) {
-				hostsByZone[zoneID] = append(hostsByZone[zoneID], host)
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			slog.Warn("Skipping host, no matching Cloudflare zone found for domain", "host", host)
+	activeByZone := make(map[string]map[string]bool)
+	ignoredByZone := make(map[string]map[string]bool)
+	zonesToSync := make(map[string]bool)
+
+	// If cleanup is enabled, we must check ALL known zones to find orphans
+	if cleanup {
+		for _, zoneID := range c.zoneMap {
+			zonesToSync[zoneID] = true
 		}
 	}
 
-	// Step 2: Sync each discovered zone independently
-	for zoneID, hosts := range hostsByZone {
-		if err := c.syncZone(zoneID, hosts, target, recordType); err != nil {
+	// Helper to bucket hosts by their Cloudflare zone
+	bucketHosts := func(hosts map[string]bool, targetBucket map[string]map[string]bool) {
+		for host := range hosts {
+			matched := false
+			for domain, zoneID := range c.zoneMap {
+				if host == domain || strings.HasSuffix(host, "."+domain) {
+					if targetBucket[zoneID] == nil {
+						targetBucket[zoneID] = make(map[string]bool)
+					}
+					targetBucket[zoneID][host] = true
+					zonesToSync[zoneID] = true
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				slog.Warn("Skipping host, no matching Cloudflare zone found for domain", "host", host)
+			}
+		}
+	}
+
+	bucketHosts(activeHosts, activeByZone)
+	bucketHosts(ignoredHosts, ignoredByZone)
+
+	// Sync each discovered zone independently
+	ctx := context.Background()
+	for zoneID := range zonesToSync {
+		if err := c.syncZone(ctx, zoneID, activeByZone[zoneID], ignoredByZone[zoneID], target, recordType, cleanup); err != nil {
 			slog.Error("Failed to sync Cloudflare zone", "zone_id", zoneID, "error", err)
 		}
 	}
@@ -135,113 +105,81 @@ func (c *CloudflareProvider) Sync(activeHosts map[string]bool, target string) er
 	return nil
 }
 
-// syncZone handles the API logic for a specific Zone ID
-func (c *CloudflareProvider) syncZone(zoneID string, hosts []string, target string, recordType string) error {
-	url := fmt.Sprintf("%s/zones/%s/dns_records?per_page=100", cloudflareAPIBase, zoneID)
+// syncZone handles the API logic for a specific Zone ID using the official SDK
+func (c *CloudflareProvider) syncZone(ctx context.Context, zoneID string, activeHosts map[string]bool, ignoredHosts map[string]bool, target string, recordType string, cleanup bool) error {
+	rc := cloudflare.ZoneIdentifier(zoneID)
 
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Add("Authorization", "Bearer "+c.cfg.Cloudflare.Token)
-
-	resp, err := c.client.Do(req)
+	// Fetch existing records for this zone
+	records, _, err := c.api.ListDNSRecords(ctx, rc, cloudflare.ListDNSRecordsParams{})
 	if err != nil {
 		return fmt.Errorf("failed to fetch records: %w", err)
 	}
-	defer func() {
-		if closeErr := resp.Body.Close(); closeErr != nil {
-			slog.Debug("failed to close response body", "error", closeErr)
-		}
-	}()
 
-	if resp.StatusCode != http.StatusOK {
-		body, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			return fmt.Errorf("cloudflare API returned status %d and failed to read body: %w", resp.StatusCode, readErr)
-		}
-		return fmt.Errorf("cloudflare API returned status %d: %s", resp.StatusCode, string(body))
-	}
+	proxied := true
 
-	var cfResp cfRecordsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&cfResp); err != nil {
-		return fmt.Errorf("failed to decode JSON: %w", err)
-	}
-
-	for _, host := range hosts {
+	// Process Updates and Creations
+	for host := range activeHosts {
 		exists := false
-		for _, rec := range cfResp.Result {
+		for _, rec := range records {
 			if rec.Name == host {
 				exists = true
 				if rec.Content != target || rec.Type != recordType {
-					c.upsertRecord(http.MethodPut, rec.ID, host, target, recordType, zoneID)
+					// Update existing record
+					params := cloudflare.UpdateDNSRecordParams{
+						ID:      rec.ID,
+						Type:    recordType,
+						Name:    host,
+						Content: target,
+						Proxied: &proxied,
+						TTL:     1, // 1 means 'Auto' in Cloudflare
+					}
+
+					_, err := c.api.UpdateDNSRecord(ctx, rc, params)
+					if err != nil {
+						slog.Error("Failed to update Cloudflare record", "host", host, "error", err)
+					} else {
+						slog.Info("Synced Cloudflare record", "action", "Updated", "type", recordType, "host", host, "target", target)
+					}
 				}
 				break
 			}
 		}
+
 		if !exists {
-			c.upsertRecord(http.MethodPost, "", host, target, recordType, zoneID)
+			// Create new record
+			params := cloudflare.CreateDNSRecordParams{
+				Type:    recordType,
+				Name:    host,
+				Content: target,
+				Proxied: &proxied,
+				TTL:     1,
+			}
+
+			_, err := c.api.CreateDNSRecord(ctx, rc, params)
+			if err != nil {
+				slog.Error("Failed to create Cloudflare record", "host", host, "error", err)
+			} else {
+				slog.Info("Synced Cloudflare record", "action", "Created", "type", recordType, "host", host, "target", target)
+			}
+		}
+	}
+
+	// Process Safe Deletions (Cleanup)
+	if cleanup {
+		for _, rec := range records {
+			if !activeHosts[rec.Name] && !ignoredHosts[rec.Name] {
+				// SAFETY LOCK: Only delete if pointing to our specific target (UUID.cfargotunnel.com)
+				if rec.Content == target && rec.Type == recordType {
+					err := c.api.DeleteDNSRecord(ctx, rc, rec.ID)
+					if err != nil {
+						slog.Error("Failed to delete orphaned Cloudflare record", "host", rec.Name, "error", err)
+					} else {
+						slog.Info("Cleaned up orphaned Cloudflare record", "host", rec.Name)
+					}
+				}
+			}
 		}
 	}
 
 	return nil
-}
-
-func (c *CloudflareProvider) upsertRecord(method, recordID, host, target, recordType, zoneID string) {
-	rec := cfRecord{
-		Name:    host,
-		Type:    recordType,
-		Content: target,
-		Proxied: true,
-		TTL:     1,
-	}
-
-	body, err := json.Marshal(rec)
-	if err != nil {
-		slog.Error("Failed to marshal Cloudflare record", "host", host, "error", err)
-		return
-	}
-
-	url := fmt.Sprintf("%s/zones/%s/dns_records", cloudflareAPIBase, zoneID)
-	if method == http.MethodPut {
-		url = fmt.Sprintf("%s/%s", url, recordID)
-	}
-
-	req, err := http.NewRequest(method, url, bytes.NewBuffer(body))
-	if err != nil {
-		slog.Error("Failed to create Cloudflare request", "host", host, "error", err)
-		return
-	}
-	req.Header.Add("Authorization", "Bearer "+c.cfg.Cloudflare.Token)
-	req.Header.Add("Content-Type", "application/json")
-
-	resp, err := c.client.Do(req)
-	if err == nil && resp.StatusCode == http.StatusOK {
-		action := "Created"
-		if method == http.MethodPut {
-			action = "Updated"
-		}
-		slog.Info("Synced Cloudflare record",
-			"action", action,
-			"type", recordType,
-			"host", host,
-			"target", target,
-			"proxied", true,
-		)
-	} else {
-		statusCode := 0
-		if resp != nil {
-			statusCode = resp.StatusCode
-		}
-		slog.Error("Failed to sync Cloudflare record",
-			"host", host,
-			"status_code", statusCode,
-		)
-	}
-
-	if resp != nil {
-		if closeErr := resp.Body.Close(); closeErr != nil {
-			slog.Debug("failed to close response body", "error", closeErr)
-		}
-	}
 }
