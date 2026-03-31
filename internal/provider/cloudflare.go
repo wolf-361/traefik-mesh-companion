@@ -53,33 +53,51 @@ func (c *CloudflareProvider) Init(cfg *config.Config) error {
 }
 
 // Sync ensures Cloudflare records match the active external Traefik containers.
-func (c *CloudflareProvider) Sync(activeHosts map[string]bool, target string) error {
+func (c *CloudflareProvider) Sync(activeHosts map[string]bool, ignoredHosts map[string]bool, target string, cleanup bool) error {
 	recordType := "CNAME"
-	if net.ParseIP(target) != nil {
+	if net.ParseIP(target) != nil { // Use A records for IP's
 		recordType = "A"
 	}
 
-	// Step 1: Group the active Traefik hosts by their respective Cloudflare Zone
-	hostsByZone := make(map[string][]string)
-	for host := range activeHosts {
-		matched := false
-		for domain, zoneID := range c.zoneMap {
-			// Match exact domain (wolf-361.ca) or subdomain (app.wolf-361.ca) safely
-			if host == domain || strings.HasSuffix(host, "."+domain) {
-				hostsByZone[zoneID] = append(hostsByZone[zoneID], host)
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			slog.Warn("Skipping host, no matching Cloudflare zone found for domain", "host", host)
+	activeByZone := make(map[string]map[string]bool)
+	ignoredByZone := make(map[string]map[string]bool)
+	zonesToSync := make(map[string]bool)
+
+	// If cleanup is enabled, we must check ALL known zones to find orphans
+	if cleanup {
+		for _, zoneID := range c.zoneMap {
+			zonesToSync[zoneID] = true
 		}
 	}
 
-	// Step 2: Sync each discovered zone independently
+	// Helper to bucket hosts by their Cloudflare zone
+	bucketHosts := func(hosts map[string]bool, targetBucket map[string]map[string]bool) {
+		for host := range hosts {
+			matched := false
+			for domain, zoneID := range c.zoneMap {
+				if host == domain || strings.HasSuffix(host, "."+domain) {
+					if targetBucket[zoneID] == nil {
+						targetBucket[zoneID] = make(map[string]bool)
+					}
+					targetBucket[zoneID][host] = true
+					zonesToSync[zoneID] = true
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				slog.Warn("Skipping host, no matching Cloudflare zone found for domain", "host", host)
+			}
+		}
+	}
+
+	bucketHosts(activeHosts, activeByZone)
+	bucketHosts(ignoredHosts, ignoredByZone)
+
+	// Sync each discovered zone independently
 	ctx := context.Background()
-	for zoneID, hosts := range hostsByZone {
-		if err := c.syncZone(ctx, zoneID, hosts, target, recordType); err != nil {
+	for zoneID := range zonesToSync {
+		if err := c.syncZone(ctx, zoneID, activeByZone[zoneID], ignoredByZone[zoneID], target, recordType, cleanup); err != nil {
 			slog.Error("Failed to sync Cloudflare zone", "zone_id", zoneID, "error", err)
 		}
 	}
@@ -88,7 +106,7 @@ func (c *CloudflareProvider) Sync(activeHosts map[string]bool, target string) er
 }
 
 // syncZone handles the API logic for a specific Zone ID using the official SDK
-func (c *CloudflareProvider) syncZone(ctx context.Context, zoneID string, hosts []string, target string, recordType string) error {
+func (c *CloudflareProvider) syncZone(ctx context.Context, zoneID string, activeHosts map[string]bool, ignoredHosts map[string]bool, target string, recordType string, cleanup bool) error {
 	rc := cloudflare.ZoneIdentifier(zoneID)
 
 	// Fetch existing records for this zone
@@ -99,13 +117,13 @@ func (c *CloudflareProvider) syncZone(ctx context.Context, zoneID string, hosts 
 
 	proxied := true
 
-	for _, host := range hosts {
+	// Process Updates and Creations
+	for host := range activeHosts {
 		exists := false
 		for _, rec := range records {
 			if rec.Name == host {
 				exists = true
 				if rec.Content != target || rec.Type != recordType {
-
 					// Update existing record
 					params := cloudflare.UpdateDNSRecordParams{
 						ID:      rec.ID,
@@ -142,6 +160,23 @@ func (c *CloudflareProvider) syncZone(ctx context.Context, zoneID string, hosts 
 				slog.Error("Failed to create Cloudflare record", "host", host, "error", err)
 			} else {
 				slog.Info("Synced Cloudflare record", "action", "Created", "type", recordType, "host", host, "target", target)
+			}
+		}
+	}
+
+	// Process Safe Deletions (Cleanup)
+	if cleanup {
+		for _, rec := range records {
+			if !activeHosts[rec.Name] && !ignoredHosts[rec.Name] {
+				// SAFETY LOCK: Only delete if pointing to our specific target (UUID.cfargotunnel.com)
+				if rec.Content == target && rec.Type == recordType {
+					err := c.api.DeleteDNSRecord(ctx, rc, rec.ID)
+					if err != nil {
+						slog.Error("Failed to delete orphaned Cloudflare record", "host", rec.Name, "error", err)
+					} else {
+						slog.Info("Cleaned up orphaned Cloudflare record", "host", rec.Name)
+					}
+				}
 			}
 		}
 	}
