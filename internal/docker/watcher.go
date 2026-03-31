@@ -22,14 +22,15 @@ type Watcher struct {
 	cfg       *config.Config
 	providers map[string]provider.DNSProvider
 
-	// Compiled Regexes
 	internalRegex *regexp.Regexp
 	externalRegex *regexp.Regexp
-	hostRegex     *regexp.Regexp // Extracted from SyncAll for performance
+	hostRegex     *regexp.Regexp
 
 	// State caching to prevent API spam
-	lastInternalHosts map[string]bool
-	lastExternalHosts map[string]bool
+	lastInternalHosts   map[string]bool
+	lastIgnoredInternal map[string]bool
+	lastExternalHosts   map[string]bool
+	lastIgnoredExternal map[string]bool
 }
 
 // NewWatcher initializes the Docker client and compiles the Traefik label regex filters.
@@ -46,14 +47,18 @@ func NewWatcher(cfg *config.Config, providers map[string]provider.DNSProvider) (
 		hostRegex: regexp.MustCompile(`Host\([` + "`" + `'](.+?)[` + "`" + `']\)`),
 	}
 
-	if cfg.Internal.Enabled {
-		regexStr := "^" + strings.ReplaceAll(cfg.Internal.FilterLabel, "*", "([^.]+)") + "$"
-		w.internalRegex = regexp.MustCompile(regexStr)
+	// Helper to safely compile the wildcard label into a regex capture group
+	compileFilter := func(label string) *regexp.Regexp {
+		escaped := regexp.QuoteMeta(label) // Escapes all the dots safely
+		pattern := "^" + strings.ReplaceAll(escaped, "\\*", "([^.]+)") + "$"
+		return regexp.MustCompile(pattern)
 	}
 
-	if cfg.External.Enabled {
-		regexStr := "^" + strings.ReplaceAll(cfg.External.FilterLabel, "*", "([^.]+)") + "$"
-		w.externalRegex = regexp.MustCompile(regexStr)
+	if cfg.Internal.Enabled && cfg.Internal.FilterLabel != "" {
+		w.internalRegex = compileFilter(cfg.Internal.FilterLabel)
+	}
+	if cfg.External.Enabled && cfg.External.FilterLabel != "" {
+		w.externalRegex = compileFilter(cfg.External.FilterLabel)
 	}
 
 	return w, nil
@@ -103,80 +108,89 @@ func (w *Watcher) SyncAll() {
 	}
 
 	internalHosts := make(map[string]bool)
+	ignoredInternal := make(map[string]bool)
 	externalHosts := make(map[string]bool)
+	ignoredExternal := make(map[string]bool)
 
 	for _, c := range containers {
-		// Only process containers explicitly enabled for Traefik
 		if c.Labels["traefik.enable"] != "true" {
 			continue
 		}
 
-		// Step 1: Group labels by Router Name for this specific container.
-		// This prevents "Router A" labels from affecting "Router B" sync logic.
 		type routerData struct {
-			rule        string
-			filterValue string
+			rule              string
+			managed           string
+			internalFilterVal string
+			externalFilterVal string
 		}
 		routers := make(map[string]*routerData)
 
-		for key, val := range c.Labels {
-			if !strings.HasPrefix(key, "traefik.http.routers.") {
-				continue
-			}
-
-			// Extract router name and the specific property (e.g., "rule" or "entrypoints")
-			parts := strings.Split(strings.TrimPrefix(key, "traefik.http.routers."), ".")
-			if len(parts) < 2 {
-				continue
-			}
-			name := parts[0]
-			property := parts[1]
-
+		getRouter := func(name string) *routerData {
 			if _, exists := routers[name]; !exists {
-				routers[name] = &routerData{}
+				routers[name] = &routerData{managed: "true"}
 			}
+			return routers[name]
+		}
 
-			if property == "rule" {
-				routers[name].rule = val
+		for key, val := range c.Labels {
+			if strings.HasPrefix(key, "traefik.http.routers.") && strings.HasSuffix(key, ".rule") {
+				name := strings.TrimSuffix(strings.TrimPrefix(key, "traefik.http.routers."), ".rule")
+				getRouter(name).rule = val
 			}
-
-			// Check if this label is our designated filter label (e.g. "entrypoints")
-			if w.cfg.Internal.Enabled && w.internalRegex.MatchString(key) {
-				routers[name].filterValue = val
-			} else if w.cfg.External.Enabled && w.externalRegex.MatchString(key) {
-				// We prioritize the external filter if the labels match both for some reason
-				routers[name].filterValue = val
+			if strings.HasPrefix(key, "traefik.http.routers.") && strings.HasSuffix(key, ".mesh.managed") {
+				name := strings.TrimSuffix(strings.TrimPrefix(key, "traefik.http.routers."), ".mesh.managed")
+				getRouter(name).managed = val
+			}
+			if w.cfg.Internal.Enabled && w.internalRegex != nil {
+				if matches := w.internalRegex.FindStringSubmatch(key); len(matches) > 1 {
+					getRouter(matches[1]).internalFilterVal = val
+				}
+			}
+			if w.cfg.External.Enabled && w.externalRegex != nil {
+				if matches := w.externalRegex.FindStringSubmatch(key); len(matches) > 1 {
+					getRouter(matches[1]).externalFilterVal = val
+				}
 			}
 		}
 
-		// Step 2: Evaluate each router independently
 		for _, data := range routers {
 			if data.rule == "" {
 				continue
 			}
 
-			// Internal Sync Check
-			if w.cfg.Internal.Enabled && strings.Contains(data.filterValue, w.cfg.Internal.FilterValue) {
-				w.extractDomains(data.rule, internalHosts)
+			isManaged := data.managed != "false"
+
+			if w.cfg.Internal.Enabled && strings.Contains(data.internalFilterVal, w.cfg.Internal.FilterValue) {
+				if isManaged {
+					w.extractDomains(data.rule, internalHosts)
+				} else {
+					w.extractDomains(data.rule, ignoredInternal)
+				}
 			}
 
-			// External Sync Check
-			// Note: If Coolify has 'internal' and your filter is 'https', this will now correctly return false.
-			if w.cfg.External.Enabled && strings.Contains(data.filterValue, w.cfg.External.FilterValue) {
-				w.extractDomains(data.rule, externalHosts)
+			if w.cfg.External.Enabled && strings.Contains(data.externalFilterVal, w.cfg.External.FilterValue) {
+				if isManaged {
+					w.extractDomains(data.rule, externalHosts)
+				} else {
+					w.extractDomains(data.rule, ignoredExternal)
+				}
 			}
 		}
 	}
 
-	// Step 3: Dispatch ONLY if state changed to prevent API rate limiting
-	if w.cfg.Internal.Enabled && !reflect.DeepEqual(w.lastInternalHosts, internalHosts) {
-		w.dispatch(w.cfg.Internal.Provider, internalHosts, w.cfg.Netbird.Target)
+	// Dispatch ONLY if state changed to prevent API rate limiting
+	internalChanged := !reflect.DeepEqual(w.lastInternalHosts, internalHosts) || !reflect.DeepEqual(w.lastIgnoredInternal, ignoredInternal)
+	if w.cfg.Internal.Enabled && internalChanged {
+		w.dispatch(w.cfg.Internal.Provider, internalHosts, ignoredInternal, w.cfg.Netbird.Target, w.cfg.Internal.Cleanup)
 		w.lastInternalHosts = internalHosts
+		w.lastIgnoredInternal = ignoredInternal
 	}
 
-	if w.cfg.External.Enabled && !reflect.DeepEqual(w.lastExternalHosts, externalHosts) {
-		w.dispatch(w.cfg.External.Provider, externalHosts, w.cfg.Cloudflare.Target)
+	externalChanged := !reflect.DeepEqual(w.lastExternalHosts, externalHosts) || !reflect.DeepEqual(w.lastIgnoredExternal, ignoredExternal)
+	if w.cfg.External.Enabled && externalChanged {
+		w.dispatch(w.cfg.External.Provider, externalHosts, ignoredExternal, w.cfg.Cloudflare.Target, w.cfg.External.Cleanup)
 		w.lastExternalHosts = externalHosts
+		w.lastIgnoredExternal = ignoredExternal
 	}
 }
 
@@ -198,15 +212,15 @@ func (w *Watcher) extractDomains(rule string, targetMap map[string]bool) {
 }
 
 // dispatch sends the mapped hosts to the appropriate DNS provider for synchronization.
-func (w *Watcher) dispatch(providerName string, hosts map[string]bool, targetIP string) {
+func (w *Watcher) dispatch(providerName string, hosts map[string]bool, ignoredHosts map[string]bool, targetIP string, cleanup bool) {
 	prov, exists := w.providers[providerName]
 	if !exists {
 		slog.Warn("Provider is enabled but not initialized in registry", "provider", providerName)
 		return
 	}
 
-	slog.Info("Synchronizing discovered hosts", "provider", providerName, "host_count", len(hosts))
-	if err := prov.Sync(hosts, targetIP); err != nil {
+	slog.Info("Synchronizing discovered hosts", "provider", providerName, "active", len(hosts), "ignored", len(ignoredHosts))
+	if err := prov.Sync(hosts, ignoredHosts, targetIP, cleanup); err != nil {
 		slog.Error("Synchronization failed", "provider", providerName, "error", err)
 	}
 }

@@ -88,29 +88,46 @@ func (n *NetbirdProvider) Init(cfg *config.Config) error {
 	return nil
 }
 
-// Sync performs a full synchronization between active Traefik hosts and NetBird DNS records.
-// It identifies which hosts belong to which NetBird zones and updates/creates records as needed.
-func (n *NetbirdProvider) Sync(activeHosts map[string]bool, targetIP string) error {
-	// Group active hosts by their corresponding NetBird Zone ID
-	hostsByZone := make(map[string][]string)
-	for host := range activeHosts {
-		matched := false
-		for zoneName, zoneID := range n.zoneMap {
-			// Match exact domain or subdomains via suffix
-			if host == zoneName || strings.HasSuffix(host, "."+zoneName) {
-				hostsByZone[zoneID] = append(hostsByZone[zoneID], host)
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			slog.Warn("Skipping host: no matching NetBird zone found", "host", host)
+// Sync performs a full synchronization, supporting safe deletions and manual overrides.
+func (n *NetbirdProvider) Sync(activeHosts map[string]bool, ignoredHosts map[string]bool, targetIP string, cleanup bool) error {
+	activeByZone := make(map[string]map[string]bool)
+	ignoredByZone := make(map[string]map[string]bool)
+	zonesToSync := make(map[string]bool)
+
+	// If cleanup is enabled, we must check ALL known zones to find orphans.
+	if cleanup {
+		for _, zoneID := range n.zoneMap {
+			zonesToSync[zoneID] = true
 		}
 	}
 
+	// Helper function to bucket hosts into their respective zones
+	bucketHosts := func(hosts map[string]bool, targetBucket map[string]map[string]bool) {
+		for host := range hosts {
+			matched := false
+			for zoneName, zoneID := range n.zoneMap {
+				if host == zoneName || strings.HasSuffix(host, "."+zoneName) {
+					if targetBucket[zoneID] == nil {
+						targetBucket[zoneID] = make(map[string]bool)
+					}
+					targetBucket[zoneID][host] = true
+					zonesToSync[zoneID] = true // Ensure this zone is synced
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				slog.Warn("Skipping host: no matching NetBird zone found", "host", host)
+			}
+		}
+	}
+
+	bucketHosts(activeHosts, activeByZone)
+	bucketHosts(ignoredHosts, ignoredByZone)
+
 	// Process each zone independently
-	for zoneID, hosts := range hostsByZone {
-		if err := n.syncZone(zoneID, hosts, targetIP); err != nil {
+	for zoneID := range zonesToSync {
+		if err := n.syncZone(zoneID, activeByZone[zoneID], ignoredByZone[zoneID], targetIP, cleanup); err != nil {
 			slog.Error("Failed to sync NetBird zone", "zone_id", zoneID, "error", err)
 		}
 	}
@@ -119,7 +136,7 @@ func (n *NetbirdProvider) Sync(activeHosts map[string]bool, targetIP string) err
 }
 
 // syncZone fetches current records for a specific zone and determines required API actions.
-func (n *NetbirdProvider) syncZone(zoneID string, hosts []string, targetIP string) error {
+func (n *NetbirdProvider) syncZone(zoneID string, activeHosts map[string]bool, ignoredHosts map[string]bool, targetIP string, cleanup bool) error {
 	url := fmt.Sprintf("%s/dns/zones/%s/records", n.cfg.Netbird.APIURL, zoneID)
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
@@ -142,22 +159,33 @@ func (n *NetbirdProvider) syncZone(zoneID string, hosts []string, targetIP strin
 		return fmt.Errorf("failed to decode records JSON: %w", err)
 	}
 
-	// Reconcile Traefik hosts with existing NetBird records
-	for _, host := range hosts {
+	// Process Updates and Creations
+	for host := range activeHosts {
 		exists := false
 		for _, rec := range currentRecords {
 			if rec.Name == host {
 				exists = true
-				// If IP changed, update the record
 				if rec.Content != targetIP {
 					n.upsertRecord(http.MethodPut, rec.ID, host, targetIP, zoneID)
 				}
 				break
 			}
 		}
-		// If record is missing, create it
 		if !exists {
 			n.upsertRecord(http.MethodPost, "", host, targetIP, zoneID)
+		}
+	}
+
+	// Process Safe Deletions (Cleanup)
+	if cleanup {
+		for _, rec := range currentRecords {
+			// If not active and not explicitly ignored by the override label
+			if !activeHosts[rec.Name] && !ignoredHosts[rec.Name] {
+				// SAFETY LOCK: Only delete if the record is actively pointing to our target IP
+				if rec.Content == targetIP && rec.Type == "A" {
+					n.deleteRecord(rec.ID, rec.Name, zoneID)
+				}
+			}
 		}
 	}
 
@@ -166,6 +194,15 @@ func (n *NetbirdProvider) syncZone(zoneID string, hosts []string, targetIP strin
 
 // upsertRecord handles the physical POST/PUT request to the NetBird API to create or update a record.
 func (n *NetbirdProvider) upsertRecord(method, recordID, host, ip, zoneID string) {
+	if n.cfg.DryRun {
+        action := "Create"
+        if method == http.MethodPut {
+            action = "Update"
+        }
+        slog.Info("[DRY RUN] Would sync NetBird record", "action", action, "host", host, "target", ip)
+        return
+    }
+
 	rec := netbirdRecord{
 		Name:    host,
 		Type:    "A",
@@ -205,6 +242,40 @@ func (n *NetbirdProvider) upsertRecord(method, recordID, host, ip, zoneID string
 			status = resp.StatusCode
 		}
 		slog.Error("Failed to sync NetBird record", "host", host, "status_code", status)
+	}
+
+	if resp != nil {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("failed to close response body", "error", closeErr)
+		}
+	}
+}
+
+// deleteRecord handles the DELETE request to remove an orphaned record.
+func (n *NetbirdProvider) deleteRecord(recordID, host, zoneID string) {
+	if n.cfg.DryRun {
+        slog.Info("[DRY RUN] Would delete orphaned NetBird record", "host", host)
+        return
+    }
+
+	url := fmt.Sprintf("%s/dns/zones/%s/records/%s", n.cfg.Netbird.APIURL, zoneID, recordID)
+
+	req, err := http.NewRequest(http.MethodDelete, url, nil)
+	if err != nil {
+		slog.Error("Failed to create NetBird delete request", "host", host, "error", err)
+		return
+	}
+	req.Header.Add("Authorization", "Token "+n.cfg.Netbird.Token)
+
+	resp, err := n.client.Do(req)
+	if err == nil && resp.StatusCode == http.StatusOK {
+		slog.Info("Cleaned up orphaned NetBird record", "host", host)
+	} else {
+		status := 0
+		if resp != nil {
+			status = resp.StatusCode
+		}
+		slog.Error("Failed to delete NetBird record", "host", host, "status_code", status)
 	}
 
 	if resp != nil {
