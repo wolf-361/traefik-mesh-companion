@@ -1,35 +1,41 @@
-// Package provider implements the DNS update logic for various backends.
 package provider
 
 import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
+	"reflect"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/wolf-361/traefik-mesh-companion/internal/config"
+	"github.com/wolf-361/traefik-mesh-companion/internal/mesh"
 )
 
-// NetbirdProvider manages internal DNS records within a NetBird Mesh network.
-// It automatically discovers available DNS zones and maps Traefik hostnames
-// to the appropriate zone ID for synchronization.
+// Ensure NetbirdProvider implements the mesh.Processor interface at compile time
+var _ mesh.Processor = (*NetbirdProvider)(nil)
+
 type NetbirdProvider struct {
 	client  *http.Client
 	cfg     *config.Config
-	zoneMap map[string]string // Mapping of zone names (e.g. "wolf-361.ca") to IDs
+	zoneMap map[string]string // Mapping of zone names to IDs
+
+	filterRegex *regexp.Regexp
+	hostRegex   *regexp.Regexp
+
+	// State caching to prevent API spam
+	lastHosts   map[string]bool
+	lastIgnored map[string]bool
 }
 
-// netbirdZone represents the structure of a DNS zone in the NetBird API.
 type netbirdZone struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 }
 
-// netbirdRecord represents a single DNS record within a NetBird zone.
 type netbirdRecord struct {
 	ID      string `json:"id,omitempty"`
 	Name    string `json:"name"`
@@ -38,15 +44,23 @@ type netbirdRecord struct {
 	TTL     int    `json:"ttl"`
 }
 
-// Init initializes the HTTP client and fetches all available DNS zones from the NetBird API.
-// This allows the provider to dynamically handle multiple domains without explicit configuration.
+func (n *NetbirdProvider) Name() string { return "NetBird" }
+
 func (n *NetbirdProvider) Init(cfg *config.Config) error {
 	n.cfg = cfg
 	n.client = &http.Client{Timeout: 10 * time.Second}
 	n.zoneMap = make(map[string]string)
+	n.hostRegex = regexp.MustCompile(`Host\([` + "`" + `'](.+?)[` + "`" + `']\)`)
 
 	if n.cfg.Netbird == nil {
 		return fmt.Errorf("netbird configuration is missing but provider was initialized")
+	}
+
+	// Compile the internal filter label regex
+	if cfg.Internal.FilterLabel != "" {
+		escaped := regexp.QuoteMeta(cfg.Internal.FilterLabel)
+		pattern := "^" + strings.ReplaceAll(escaped, "\\*", "([^.]+)") + "$"
+		n.filterRegex = regexp.MustCompile(pattern)
 	}
 
 	// Fetch all DNS zones authorized for the provided token
@@ -67,11 +81,7 @@ func (n *NetbirdProvider) Init(cfg *config.Config) error {
 	}()
 
 	if resp.StatusCode != http.StatusOK {
-		body, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			return fmt.Errorf("netbird API returned status %d and failed to read body: %w", resp.StatusCode, readErr)
-		}
-		return fmt.Errorf("netbird API returned status %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("netbird API returned status %d", resp.StatusCode)
 	}
 
 	var zones []netbirdZone
@@ -79,7 +89,6 @@ func (n *NetbirdProvider) Init(cfg *config.Config) error {
 		return fmt.Errorf("failed to decode zones JSON: %w", err)
 	}
 
-	// Build the internal map for host-to-zone routing
 	for _, z := range zones {
 		n.zoneMap[z.Name] = z.ID
 	}
@@ -88,20 +97,79 @@ func (n *NetbirdProvider) Init(cfg *config.Config) error {
 	return nil
 }
 
-// Sync performs a full synchronization, supporting safe deletions and manual overrides.
+// Process satisfies the mesh.Processor interface.
+func (n *NetbirdProvider) Process(services []mesh.Service) error {
+	activeHosts := make(map[string]bool)
+	ignoredHosts := make(map[string]bool)
+
+	for _, svc := range services {
+		type routerData struct {
+			rule      string
+			managed   string
+			filterVal string
+		}
+		routers := make(map[string]*routerData)
+
+		getRouter := func(name string) *routerData {
+			if _, exists := routers[name]; !exists {
+				routers[name] = &routerData{managed: "true"}
+			}
+			return routers[name]
+		}
+
+		for key, val := range svc.Labels {
+			if strings.HasPrefix(key, "traefik.http.routers.") && strings.HasSuffix(key, ".rule") {
+				name := strings.TrimSuffix(strings.TrimPrefix(key, "traefik.http.routers."), ".rule")
+				getRouter(name).rule = val
+			}
+			if strings.HasPrefix(key, "traefik.http.routers.") && strings.HasSuffix(key, ".mesh.managed") {
+				name := strings.TrimSuffix(strings.TrimPrefix(key, "traefik.http.routers."), ".mesh.managed")
+				getRouter(name).managed = val
+			}
+			if n.filterRegex != nil {
+				if matches := n.filterRegex.FindStringSubmatch(key); len(matches) > 1 {
+					getRouter(matches[1]).filterVal = val
+				}
+			}
+		}
+
+		for _, data := range routers {
+			if data.rule == "" {
+				continue
+			}
+
+			if n.matchFilter(data.filterVal, n.cfg.Internal.FilterValue) {
+				if data.managed != "false" {
+					n.extractDomains(data.rule, activeHosts)
+				} else {
+					n.extractDomains(data.rule, ignoredHosts)
+				}
+			}
+		}
+	}
+
+	// Dispatch ONLY if the state changed
+	if !reflect.DeepEqual(n.lastHosts, activeHosts) || !reflect.DeepEqual(n.lastIgnored, ignoredHosts) {
+		err := n.Sync(activeHosts, ignoredHosts, n.cfg.Netbird.Target, n.cfg.Internal.Cleanup)
+		n.lastHosts = activeHosts
+		n.lastIgnored = ignoredHosts
+		return err
+	}
+
+	return nil
+}
+
 func (n *NetbirdProvider) Sync(activeHosts map[string]bool, ignoredHosts map[string]bool, targetIP string, cleanup bool) error {
 	activeByZone := make(map[string]map[string]bool)
 	ignoredByZone := make(map[string]map[string]bool)
 	zonesToSync := make(map[string]bool)
 
-	// If cleanup is enabled, we must check ALL known zones to find orphans.
 	if cleanup {
 		for _, zoneID := range n.zoneMap {
 			zonesToSync[zoneID] = true
 		}
 	}
 
-	// Helper function to bucket hosts into their respective zones
 	bucketHosts := func(hosts map[string]bool, targetBucket map[string]map[string]bool) {
 		for host := range hosts {
 			matched := false
@@ -111,7 +179,7 @@ func (n *NetbirdProvider) Sync(activeHosts map[string]bool, ignoredHosts map[str
 						targetBucket[zoneID] = make(map[string]bool)
 					}
 					targetBucket[zoneID][host] = true
-					zonesToSync[zoneID] = true // Ensure this zone is synced
+					zonesToSync[zoneID] = true
 					matched = true
 					break
 				}
@@ -125,7 +193,6 @@ func (n *NetbirdProvider) Sync(activeHosts map[string]bool, ignoredHosts map[str
 	bucketHosts(activeHosts, activeByZone)
 	bucketHosts(ignoredHosts, ignoredByZone)
 
-	// Process each zone independently
 	for zoneID := range zonesToSync {
 		if err := n.syncZone(zoneID, activeByZone[zoneID], ignoredByZone[zoneID], targetIP, cleanup); err != nil {
 			slog.Error("Failed to sync NetBird zone", "zone_id", zoneID, "error", err)
@@ -135,18 +202,14 @@ func (n *NetbirdProvider) Sync(activeHosts map[string]bool, ignoredHosts map[str
 	return nil
 }
 
-// syncZone fetches current records for a specific zone and determines required API actions.
 func (n *NetbirdProvider) syncZone(zoneID string, activeHosts map[string]bool, ignoredHosts map[string]bool, targetIP string, cleanup bool) error {
 	url := fmt.Sprintf("%s/dns/zones/%s/records", n.cfg.Netbird.APIURL, zoneID)
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
 	req.Header.Add("Authorization", "Token "+n.cfg.Netbird.Token)
 
 	resp, err := n.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to fetch records: %w", err)
+		return err
 	}
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
@@ -156,10 +219,9 @@ func (n *NetbirdProvider) syncZone(zoneID string, activeHosts map[string]bool, i
 
 	var currentRecords []netbirdRecord
 	if err := json.NewDecoder(resp.Body).Decode(&currentRecords); err != nil {
-		return fmt.Errorf("failed to decode records JSON: %w", err)
+		return err
 	}
 
-	// Process Updates and Creations
 	for host := range activeHosts {
 		exists := false
 		for _, rec := range currentRecords {
@@ -176,12 +238,9 @@ func (n *NetbirdProvider) syncZone(zoneID string, activeHosts map[string]bool, i
 		}
 	}
 
-	// Process Safe Deletions (Cleanup)
 	if cleanup {
 		for _, rec := range currentRecords {
-			// If not active and not explicitly ignored by the override label
 			if !activeHosts[rec.Name] && !ignoredHosts[rec.Name] {
-				// SAFETY LOCK: Only delete if the record is actively pointing to our target IP
 				if rec.Content == targetIP && rec.Type == "A" {
 					n.deleteRecord(rec.ID, rec.Name, zoneID)
 				}
@@ -192,58 +251,57 @@ func (n *NetbirdProvider) syncZone(zoneID string, activeHosts map[string]bool, i
 	return nil
 }
 
-// upsertRecord handles the physical POST/PUT request to the NetBird API to create or update a record.
+// --- Helpers ---
+
+func (n *NetbirdProvider) extractDomains(rule string, targetMap map[string]bool) {
+	matches := n.hostRegex.FindAllStringSubmatch(rule, -1)
+	for _, match := range matches {
+		if len(match) > 1 {
+			domains := strings.Split(match[1], ",")
+			for _, domain := range domains {
+				cleanDomain := strings.Trim(strings.TrimSpace(domain), "`'\"")
+				if cleanDomain != "" {
+					targetMap[cleanDomain] = true
+				}
+			}
+		}
+	}
+}
+
+func (n *NetbirdProvider) matchFilter(labelValue string, envFilter string) bool {
+	for _, f := range strings.Split(envFilter, ",") {
+		cleanFilter := strings.TrimSpace(f)
+		if cleanFilter != "" && strings.Contains(labelValue, cleanFilter) {
+			return true
+		}
+	}
+	return false
+}
+
 func (n *NetbirdProvider) upsertRecord(method, recordID, host, ip, zoneID string) {
 	if n.cfg.DryRun {
-		action := "Create"
-		if method == http.MethodPut {
-			action = "Update"
-		}
-		slog.Info("[DRY RUN] Would sync NetBird record", "action", action, "host", host, "target", ip)
+		slog.Info("[DRY RUN] Would sync NetBird record", "method", method, "host", host, "target", ip)
 		return
 	}
 
-	rec := netbirdRecord{
-		Name:    host,
-		Type:    "A",
-		Content: ip,
-		TTL:     300,
-	}
-
-	body, err := json.Marshal(rec)
-	if err != nil {
-		slog.Error("Failed to marshal NetBird record", "host", host, "error", err)
-		return
-	}
+	rec := netbirdRecord{Name: host, Type: "A", Content: ip, TTL: 300}
+	body, _ := json.Marshal(rec)
 
 	url := fmt.Sprintf("%s/dns/zones/%s/records", n.cfg.Netbird.APIURL, zoneID)
 	if method == http.MethodPut {
 		url = fmt.Sprintf("%s/%s", url, recordID)
 	}
 
-	req, err := http.NewRequest(method, url, bytes.NewBuffer(body))
-	if err != nil {
-		slog.Error("Failed to create NetBird request", "host", host, "error", err)
-		return
-	}
+	req, _ := http.NewRequest(method, url, bytes.NewBuffer(body))
 	req.Header.Add("Authorization", "Token "+n.cfg.Netbird.Token)
 	req.Header.Add("Content-Type", "application/json")
 
 	resp, err := n.client.Do(req)
 	if err == nil && resp.StatusCode == http.StatusOK {
-		action := "Created"
-		if method == http.MethodPut {
-			action = "Updated"
-		}
-		slog.Info("Synced NetBird record", "action", action, "host", host, "target", ip)
+		slog.Info("Synced NetBird record", "action", method, "host", host)
 	} else {
-		status := 0
-		if resp != nil {
-			status = resp.StatusCode
-		}
-		slog.Error("Failed to sync NetBird record", "host", host, "status_code", status)
+		slog.Error("Failed to sync NetBird record", "host", host)
 	}
-
 	if resp != nil {
 		if closeErr := resp.Body.Close(); closeErr != nil {
 			slog.Debug("failed to close response body", "error", closeErr)
@@ -251,33 +309,20 @@ func (n *NetbirdProvider) upsertRecord(method, recordID, host, ip, zoneID string
 	}
 }
 
-// deleteRecord handles the DELETE request to remove an orphaned record.
 func (n *NetbirdProvider) deleteRecord(recordID, host, zoneID string) {
 	if n.cfg.DryRun {
-		slog.Info("[DRY RUN] Would delete orphaned NetBird record", "host", host)
+		slog.Info("[DRY RUN] Would delete NetBird record", "host", host)
 		return
 	}
 
 	url := fmt.Sprintf("%s/dns/zones/%s/records/%s", n.cfg.Netbird.APIURL, zoneID, recordID)
-
-	req, err := http.NewRequest(http.MethodDelete, url, nil)
-	if err != nil {
-		slog.Error("Failed to create NetBird delete request", "host", host, "error", err)
-		return
-	}
+	req, _ := http.NewRequest(http.MethodDelete, url, nil)
 	req.Header.Add("Authorization", "Token "+n.cfg.Netbird.Token)
 
 	resp, err := n.client.Do(req)
 	if err == nil && resp.StatusCode == http.StatusOK {
-		slog.Info("Cleaned up orphaned NetBird record", "host", host)
-	} else {
-		status := 0
-		if resp != nil {
-			status = resp.StatusCode
-		}
-		slog.Error("Failed to delete NetBird record", "host", host, "status_code", status)
+		slog.Info("Cleaned up NetBird record", "host", host)
 	}
-
 	if resp != nil {
 		if closeErr := resp.Body.Close(); closeErr != nil {
 			slog.Debug("failed to close response body", "error", closeErr)
