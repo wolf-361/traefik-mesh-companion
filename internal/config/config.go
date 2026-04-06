@@ -28,6 +28,8 @@ type Config struct {
 
 	Netbird    *NetbirdConfig
 	Cloudflare *CloudflareConfig
+
+	Kuma *KumaConfig
 }
 
 // Load reads environment variables and returns a populated Config.
@@ -61,6 +63,9 @@ func Load() *Config {
 	if cfg.isProviderUsed("cloudflare") {
 		cfg.Cloudflare = loadCloudflareConfig()
 	}
+
+	// Check for kuma
+	cfg.Kuma = loadKumaConfig()
 
 	return cfg
 }

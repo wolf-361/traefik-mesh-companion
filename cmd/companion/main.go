@@ -14,6 +14,7 @@ import (
 	"github.com/wolf-361/traefik-mesh-companion/internal/config"
 	"github.com/wolf-361/traefik-mesh-companion/internal/docker"
 	"github.com/wolf-361/traefik-mesh-companion/internal/health"
+	"github.com/wolf-361/traefik-mesh-companion/internal/kuma"
 	"github.com/wolf-361/traefik-mesh-companion/internal/mesh"
 	"github.com/wolf-361/traefik-mesh-companion/internal/provider"
 )
@@ -82,6 +83,19 @@ func main() {
 			os.Exit(1)
 		}
 		processors = append(processors, cf)
+	}
+
+	// Register Uptime Kuma
+	if cfg.Kuma != nil {
+		slog.Debug("Booting Uptime Kuma Client...")
+		kc := kuma.NewClient(cfg.Kuma)
+		if kc != nil {
+			// Perform the one-time state sync to pre-populate our caches
+			if err := kc.SyncState(); err != nil {
+				slog.Warn("Kuma initial sync failed, continuing anyway", "error", err)
+			}
+			processors = append(processors, kc)
+		}
 	}
 
 	// Sanity Check
