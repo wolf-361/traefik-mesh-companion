@@ -1,4 +1,4 @@
-package health
+package server
 
 import (
 	"context"

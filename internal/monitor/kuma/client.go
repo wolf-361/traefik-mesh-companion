@@ -11,21 +11,22 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wolf-361/traefik-mesh-companion/internal/config"
-	"github.com/wolf-361/traefik-mesh-companion/internal/mesh"
+	"github.com/wolf-361/traefik-mesh-companion/internal/core"
 )
 
-// Ensure Client implements the mesh.Processor interface at compile time
-var _ mesh.Processor = (*Client)(nil)
+// Ensure Client implements the core.Processor interface at compile time
+var _ core.Processor = (*Client)(nil)
 
 type Client struct {
-	cfg        *config.KumaConfig
+	cfg        *Config // Uses the local config struct now
 	http       *http.Client
 	tracked    map[string]bool // State cache: URL+Name -> exists
 	groupCache map[string]int  // State cache: GroupName -> ID
 }
 
-func NewClient(cfg *config.KumaConfig) *Client {
+// New initializes the Kuma client, loading its own config automatically.
+func New() *Client {
+	cfg := LoadConfig()
 	if cfg == nil {
 		slog.Debug("Uptime Kuma Client config not found, skipping initialization")
 		return nil
@@ -74,7 +75,8 @@ func (c *Client) SyncState() error {
 		if m.Type == "group" {
 			c.groupCache[m.Name] = m.ID
 		} else {
-			c.tracked[m.URL+m.Name] = true
+			cacheKey := m.URL + m.Name
+			c.tracked[cacheKey] = true
 		}
 	}
 
@@ -82,7 +84,7 @@ func (c *Client) SyncState() error {
 	return nil
 }
 
-func (c *Client) Process(services []mesh.Service) error {
+func (c *Client) Process(services []core.Service) error {
 	if c.cfg == nil {
 		return nil
 	}
@@ -117,7 +119,7 @@ func (c *Client) Process(services []mesh.Service) error {
 	return nil
 }
 
-func (c *Client) buildPayload(svc mesh.Service) MonitorPayload {
+func (c *Client) buildPayload(svc core.Service) MonitorPayload {
 	labels := svc.Labels
 
 	payload := MonitorPayload{

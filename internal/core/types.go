@@ -1,4 +1,4 @@
-package mesh
+package core
 
 // Service represents a normalized Traefik application discovered in Docker
 type Service struct {

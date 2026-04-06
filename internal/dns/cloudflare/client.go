@@ -1,4 +1,4 @@
-package provider
+package cloudflare
 
 import (
 	"context"
@@ -11,15 +11,18 @@ import (
 
 	"github.com/cloudflare/cloudflare-go"
 	"github.com/wolf-361/traefik-mesh-companion/internal/config"
-	"github.com/wolf-361/traefik-mesh-companion/internal/mesh"
+	"github.com/wolf-361/traefik-mesh-companion/internal/core"
 )
 
-// Ensure CloudflareProvider implements the mesh.Processor interface at compile time
-var _ mesh.Processor = (*CloudflareProvider)(nil)
+// Ensure Client implements the core.Processor interface at compile time
+var _ core.Processor = (*Client)(nil)
 
-type CloudflareProvider struct {
+type Client struct {
+	cfCfg       *Config
+	pipelineCfg *config.Pipeline
+	dryRun      bool
+
 	api     *cloudflare.API
-	cfg     *config.Config
 	zoneMap map[string]string // Maps root domain to its Zone ID
 
 	filterRegex *regexp.Regexp
@@ -30,31 +33,40 @@ type CloudflareProvider struct {
 	lastIgnored map[string]bool
 }
 
-func (c *CloudflareProvider) Name() string { return "Cloudflare" }
-
-func (c *CloudflareProvider) Init(cfg *config.Config) error {
-	c.cfg = cfg
-	c.zoneMap = make(map[string]string)
-	c.hostRegex = regexp.MustCompile(`Host\([` + "`" + `'](.+?)[` + "`" + `']\)`)
-
-	if c.cfg.Cloudflare == nil {
-		return fmt.Errorf("cloudflare configuration is missing but provider was initialized")
+// New initializes the client. It only requires the pipeline instructions and dry run state.
+func New(pipelineCfg *config.Pipeline, dryRun bool) *Client {
+	cfCfg := LoadConfig()
+	if cfCfg == nil {
+		slog.Debug("Cloudflare configuration missing, skipping initialization")
+		return nil
 	}
 
-	// Compile the external filter label regex (e.g. traefik.http.routers.*.entrypoints)
-	if cfg.External.FilterLabel != "" {
-		escaped := regexp.QuoteMeta(cfg.External.FilterLabel)
+	c := &Client{
+		cfCfg:       cfCfg,
+		pipelineCfg: pipelineCfg,
+		dryRun:      dryRun,
+		zoneMap:     make(map[string]string),
+		hostRegex:   regexp.MustCompile(`Host\([` + "`" + `'](.+?)[` + "`" + `']\)`),
+	}
+
+	if pipelineCfg.FilterLabel != "" {
+		escaped := regexp.QuoteMeta(pipelineCfg.FilterLabel)
 		pattern := "^" + strings.ReplaceAll(escaped, "\\*", "([^.]+)") + "$"
 		c.filterRegex = regexp.MustCompile(pattern)
 	}
 
+	return c
+}
+
+func (c *Client) Name() string { return "Cloudflare" }
+
+func (c *Client) Init() error {
 	var err error
-	c.api, err = cloudflare.NewWithAPIToken(c.cfg.Cloudflare.Token)
+	c.api, err = cloudflare.NewWithAPIToken(c.cfCfg.Token)
 	if err != nil {
 		return fmt.Errorf("failed to initialize cloudflare client: %w", err)
 	}
 
-	// Fetch available zones
 	ctx := context.Background()
 	zones, err := c.api.ListZones(ctx)
 	if err != nil {
@@ -69,13 +81,12 @@ func (c *CloudflareProvider) Init(cfg *config.Config) error {
 	return nil
 }
 
-// Process satisfies the mesh.Processor interface.
-func (c *CloudflareProvider) Process(services []mesh.Service) error {
+// Process satisfies the core.Processor interface.
+func (c *Client) Process(services []core.Service) error {
 	activeHosts := make(map[string]bool)
 	ignoredHosts := make(map[string]bool)
 
 	for _, svc := range services {
-		// Group labels by router for this service
 		type routerData struct {
 			rule      string
 			managed   string
@@ -106,13 +117,12 @@ func (c *CloudflareProvider) Process(services []mesh.Service) error {
 			}
 		}
 
-		// Evaluate extracted routers against External filter criteria
 		for _, data := range routers {
 			if data.rule == "" {
 				continue
 			}
 
-			if c.matchFilter(data.filterVal, c.cfg.External.FilterValue) {
+			if c.matchFilter(data.filterVal, c.pipelineCfg.FilterValue) {
 				if data.managed != "false" {
 					c.extractDomains(data.rule, activeHosts)
 				} else {
@@ -122,9 +132,8 @@ func (c *CloudflareProvider) Process(services []mesh.Service) error {
 		}
 	}
 
-	// Only sync if the state has actually changed
 	if !reflect.DeepEqual(c.lastHosts, activeHosts) || !reflect.DeepEqual(c.lastIgnored, ignoredHosts) {
-		err := c.Sync(activeHosts, ignoredHosts, c.cfg.Cloudflare.Target, c.cfg.External.Cleanup)
+		err := c.Sync(activeHosts, ignoredHosts, c.cfCfg.Target, c.pipelineCfg.Cleanup)
 		c.lastHosts = activeHosts
 		c.lastIgnored = ignoredHosts
 		return err
@@ -133,7 +142,7 @@ func (c *CloudflareProvider) Process(services []mesh.Service) error {
 	return nil
 }
 
-func (c *CloudflareProvider) Sync(activeHosts map[string]bool, ignoredHosts map[string]bool, target string, cleanup bool) error {
+func (c *Client) Sync(activeHosts map[string]bool, ignoredHosts map[string]bool, target string, cleanup bool) error {
 	recordType := "CNAME"
 	if net.ParseIP(target) != nil {
 		recordType = "A"
@@ -182,7 +191,7 @@ func (c *CloudflareProvider) Sync(activeHosts map[string]bool, ignoredHosts map[
 	return nil
 }
 
-func (c *CloudflareProvider) syncZone(ctx context.Context, zoneID string, activeHosts map[string]bool, ignoredHosts map[string]bool, target string, recordType string, cleanup bool) error {
+func (c *Client) syncZone(ctx context.Context, zoneID string, activeHosts map[string]bool, ignoredHosts map[string]bool, target string, recordType string, cleanup bool) error {
 	rc := cloudflare.ZoneIdentifier(zoneID)
 	records, _, err := c.api.ListDNSRecords(ctx, rc, cloudflare.ListDNSRecordsParams{})
 	if err != nil {
@@ -197,7 +206,7 @@ func (c *CloudflareProvider) syncZone(ctx context.Context, zoneID string, active
 			if rec.Name == host {
 				exists = true
 				if rec.Content != target || rec.Type != recordType {
-					if c.cfg.DryRun {
+					if c.dryRun {
 						slog.Info("[DRY RUN] Would update Cloudflare record", "host", host, "target", target)
 					} else {
 						params := cloudflare.UpdateDNSRecordParams{
@@ -216,7 +225,7 @@ func (c *CloudflareProvider) syncZone(ctx context.Context, zoneID string, active
 		}
 
 		if !exists {
-			if c.cfg.DryRun {
+			if c.dryRun {
 				slog.Info("[DRY RUN] Would create Cloudflare record", "host", host, "target", target)
 			} else {
 				params := cloudflare.CreateDNSRecordParams{
@@ -236,7 +245,7 @@ func (c *CloudflareProvider) syncZone(ctx context.Context, zoneID string, active
 		for _, rec := range records {
 			if !activeHosts[rec.Name] && !ignoredHosts[rec.Name] {
 				if rec.Content == target && rec.Type == recordType {
-					if c.cfg.DryRun {
+					if c.dryRun {
 						slog.Info("[DRY RUN] Would delete Cloudflare record", "host", rec.Name)
 					} else {
 						err := c.api.DeleteDNSRecord(ctx, rc, rec.ID)
@@ -256,7 +265,7 @@ func (c *CloudflareProvider) syncZone(ctx context.Context, zoneID string, active
 
 // --- Helpers ---
 
-func (c *CloudflareProvider) extractDomains(rule string, targetMap map[string]bool) {
+func (c *Client) extractDomains(rule string, targetMap map[string]bool) {
 	matches := c.hostRegex.FindAllStringSubmatch(rule, -1)
 	for _, match := range matches {
 		if len(match) > 1 {
@@ -271,7 +280,7 @@ func (c *CloudflareProvider) extractDomains(rule string, targetMap map[string]bo
 	}
 }
 
-func (c *CloudflareProvider) matchFilter(labelValue string, envFilter string) bool {
+func (c *Client) matchFilter(labelValue string, envFilter string) bool {
 	for _, f := range strings.Split(envFilter, ",") {
 		cleanFilter := strings.TrimSpace(f)
 		if cleanFilter != "" && strings.Contains(labelValue, cleanFilter) {

@@ -1,4 +1,4 @@
-package docker
+package watcher
 
 import (
 	"context"
@@ -12,17 +12,17 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/client"
 	"github.com/wolf-361/traefik-mesh-companion/internal/config"
-	"github.com/wolf-361/traefik-mesh-companion/internal/mesh"
+	"github.com/wolf-361/traefik-mesh-companion/internal/core"
 )
 
 type Watcher struct {
 	cli        *client.Client
 	cfg        *config.Config
-	processors []mesh.Processor
+	processors []core.Processor
 	hostRegex  *regexp.Regexp
 }
 
-func NewWatcher(cfg *config.Config, processors []mesh.Processor) (*Watcher, error) {
+func NewWatcher(cfg *config.Config, processors []core.Processor) (*Watcher, error) {
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		return nil, err
@@ -72,14 +72,14 @@ func (w *Watcher) SyncAll() {
 		return
 	}
 
-	var services []mesh.Service
+	var services []core.Service
 
 	for _, c := range containers {
 		if c.Labels["traefik.enable"] != "true" {
 			continue
 		}
 
-		svc := mesh.Service{
+		svc := core.Service{
 			ContainerName: strings.TrimPrefix(c.Names[0], "/"),
 			Labels:        c.Labels,
 		}
