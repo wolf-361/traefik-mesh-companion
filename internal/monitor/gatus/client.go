@@ -50,6 +50,9 @@ func (c *Client) SyncState() error {
 
 	// Call our new GET /api/v1/endpoints
 	req, _ := http.NewRequest(http.MethodGet, c.cfg.BridgeURL+"/api/v1/endpoints", nil)
+	if c.cfg.APIKey != "" {
+		req.Header.Set("X-API-Key", c.cfg.APIKey)
+	}
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -164,6 +167,9 @@ func (c *Client) AddEndpoint(payload EndpointPayload) error {
 		// POST to our new API
 		req, _ := http.NewRequest(http.MethodPost, c.cfg.BridgeURL+"/api/v1/endpoints", bytes.NewBuffer(body))
 		req.Header.Set("Content-Type", "application/json")
+		if c.cfg.APIKey != "" {
+			req.Header.Set("X-API-Key", c.cfg.APIKey)
+		}
 
 		resp, err := c.http.Do(req)
 		if err != nil {
