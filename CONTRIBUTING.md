@@ -29,7 +29,7 @@ To develop locally, you will need:
 
 1. Clone your fork:
    ```bash
-   git clone https://github.com/wolf-361/traefik-mesh-companion.git
+   git clone [https://github.com/wolf-361/traefik-mesh-companion.git](https://github.com/wolf-361/traefik-mesh-companion.git)
    cd traefik-mesh-companion
    ```
 2. Download dependencies:
@@ -41,62 +41,88 @@ To develop locally, you will need:
    LOG_LEVEL=debug \
    INTERNAL_PROVIDER=netbird \
    NETBIRD_API_TOKEN=fake_token \
-   NETBIRD_ZONE_NAME=local.dev \
    NETBIRD_TARGET_IP=127.0.0.1 \
    go run cmd/companion/main.go
    ```
 
 ---
 
-## 🔌 How to Add a New DNS Provider
+## 🔌 How to Add a New Integration
 
-This project uses a dual-pipeline architecture. Adding a new provider (like Tailscale, Pi-hole, or AWS Route53) requires adding its configuration and implementing the standard provider interface. You do **not** need to touch the core Docker watching logic.
+This project uses a **Capability-Driven Architecture** (Vertical Slices). Integrations are fully decoupled from the core application. Adding a new DNS provider (like Pi-hole or AWS Route53) or a new Monitoring tool (like Datadog) requires creating a dedicated package. You do **not** need to touch the core Docker watching logic or the global application configuration.
 
-**1. Add Configuration (`internal/config/`)**
-Create a new file (e.g., `tailscale.go`) to hold the specific credentials, and add a pointer to your struct in the main `Config` struct inside `config.go`. Ensure it is only loaded if the user explicitly enables it.
+**1. Create a Feature Package**
+Create a new folder in either `internal/dns/` or `internal/monitor/` based on the capability (e.g., `internal/dns/pihole/`).
 
-**2. Implement the `DNSProvider` interface (`internal/provider/`)**
-Create a new file (e.g., `tailscale.go`) and implement the core interface:
+**2. Isolate Configuration (`config.go`)**
+Integrations must load their own environment variables. Do **not** add specific provider credentials to the global `config/config.go` file. Create a local config loader:
    ```go
-   package provider
+   package pihole
 
-   import "[github.com/wolf-361/traefik-mesh-companion/internal/config](https://github.com/wolf-361/traefik-mesh-companion/internal/config)"
+   import "os"
 
-   type TailscaleProvider struct {
-       cfg *config.Config
+   type Config struct {
+       URL   string
+       Token string
    }
 
-   func (t *TailscaleProvider) Init(cfg *config.Config) error {
-       t.cfg = cfg
-       // Connect to the API, validate tokens, etc.
-       return nil
+   // LoadConfig returns nil if core requirements are missing, skipping initialization.
+   func LoadConfig() *Config {
+       token := os.Getenv("PIHOLE_TOKEN")
+       if token == "" {
+           return nil
+       }
+       return &Config{Token: token}
+   }
+   ```
+
+**3. Implement `core.Processor` (`client.go`)**
+Your client must implement the standard processor interface defined in `internal/core/types.go`.
+   ```go
+   package pihole
+
+   import "github.com/wolf-361/traefik-mesh-companion/internal/core"
+
+   // Ensure compile-time interface compliance
+   var _ core.Processor = (*Client)(nil)
+
+   type Client struct {
+       cfg *Config
    }
 
-   func (t *TailscaleProvider) Sync(activeHosts map[string]bool, target string) error {
-       // target can be an IP address (A record) or a domain (CNAME)
-       // 1. Fetch current records from the provider
-       // 2. Compare against activeHosts
+   func New() *Client {
+       cfg := LoadConfig()
+       if cfg == nil { return nil }
+       return &Client{cfg: cfg}
+   }
+
+   func (c *Client) Name() string { return "Pi-hole" }
+
+   func (c *Client) Process(services []core.Service) error {
+       // 1. Filter the Traefik labels relevant to your integration
+       // 2. Diff current state against the external API
        // 3. Upsert missing records and delete stale ones
        return nil
    }
    ```
 
-**3. Register your provider (`cmd/companion/main.go`)**
-Add your new provider to the initialization registry map. This allows it to be used in either the Internal or External pipelines dynamically:
+**4. Register your provider (`cmd/companion/main.go`)**
+Initialize your provider in the orchestrator. For DNS providers, add a case to the appropriate pipeline `switch` statement. For monitoring, append it directly to the processor list:
    ```go
-   if cfg.Tailscale != nil {
-       slog.Info("Booting Tailscale Provider...")
-       ts := &provider.TailscaleProvider{}
-       if err := ts.Init(cfg); err != nil {
-           slog.Error("Failed to initialize Tailscale", "error", err)
-           os.Exit(1)
+   switch cfg.Internal.Provider {
+   // ... existing providers ...
+   case "pihole":
+       slog.Debug("Booting Pi-hole Provider...")
+       if ph := pihole.New(); ph != nil {
+           processors = append(processors, ph)
        }
-       providers["tailscale"] = ts // <-- Register it by name
    }
    ```
 
-**4. Update the Documentation**
-Update the `README.md` to document any new environment variables your provider requires (e.g., `TAILSCALE_API_TOKEN`).
+**5. Update the Documentation**
+Update the `README.md` to document any new environment variables your provider requires.
+
+---
 
 ## 📝 Styleguides
 
@@ -106,6 +132,7 @@ Update the `README.md` to document any new environment variables your provider r
 * Limit the first line to 72 characters or less.
 * Reference issues and pull requests liberally after the first line.
 
-### Go Styleguide
+### Go Architecture & Style
 * All Go code must be formatted using `gofmt`.
-* We strictly avoid `utils` or `helpers` packages. Place code in a domain-specific package that describes *what* it does.
+* Ensure all HTTP response bodies are properly closed, wrapped in a `defer func()` to satisfy `errcheck` linters.
+* **No Junk Drawers:** We strictly avoid generic `utils`, `helpers`, or `providers` packages. We use Capability-Driven Vertical Slices. Place code in a domain-specific package that describes *what* it does (e.g., `internal/dns/cloudflare`).
