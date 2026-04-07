@@ -15,7 +15,7 @@ import (
 	"github.com/wolf-361/traefik-mesh-companion/internal/core"
 	"github.com/wolf-361/traefik-mesh-companion/internal/dns/cloudflare"
 	"github.com/wolf-361/traefik-mesh-companion/internal/dns/netbird"
-	"github.com/wolf-361/traefik-mesh-companion/internal/monitor/kuma"
+	"github.com/wolf-361/traefik-mesh-companion/internal/monitor/gatus"
 	"github.com/wolf-361/traefik-mesh-companion/internal/server"
 	"github.com/wolf-361/traefik-mesh-companion/internal/watcher"
 )
@@ -106,12 +106,12 @@ func main() {
 	}
 
 	// Assemble Monitoring
-	slog.Debug("Checking for Uptime Kuma configuration...")
-	if kc := kuma.New(exec); kc != nil {
-		if err := kc.SyncState(); err != nil {
-			slog.Warn("Kuma initial sync failed, continuing anyway", "error", err)
+	slog.Debug("Checking for Gatus Bridge configuration...")
+	if gc := gatus.New(exec); gc != nil {
+		if err := gc.SyncState(); err != nil {
+			slog.Warn("Gatus initial sync failed, continuing anyway", "error", err)
 		}
-		processors = append(processors, kc)
+		processors = append(processors, gc)
 	}
 
 	// Sanity Check
