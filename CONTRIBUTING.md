@@ -77,23 +77,24 @@ Integrations must load their own environment variables. Do **not** add specific 
    ```
 
 **3. Implement `core.Processor` (`client.go`)**
-Your client must implement the standard processor interface defined in `internal/core/types.go`.
+Your client must implement the standard processor interface defined in `internal/core/types.go`. It must also accept the global `core.Executor` to handle API mutations safely.
    ```go
    package pihole
 
-   import "github.com/wolf-361/traefik-mesh-companion/internal/core"
+   import "[github.com/wolf-361/traefik-mesh-companion/internal/core](https://github.com/wolf-361/traefik-mesh-companion/internal/core)"
 
    // Ensure compile-time interface compliance
    var _ core.Processor = (*Client)(nil)
 
    type Client struct {
-       cfg *Config
+       cfg  *Config
+       exec *core.Executor
    }
 
-   func New() *Client {
+   func New(exec *core.Executor) *Client {
        cfg := LoadConfig()
        if cfg == nil { return nil }
-       return &Client{cfg: cfg}
+       return &Client{cfg: cfg, exec: exec}
    }
 
    func (c *Client) Name() string { return "Pi-hole" }
@@ -101,19 +102,24 @@ Your client must implement the standard processor interface defined in `internal
    func (c *Client) Process(services []core.Service) error {
        // 1. Filter the Traefik labels relevant to your integration
        // 2. Diff current state against the external API
-       // 3. Upsert missing records and delete stale ones
+
+       // 3. Wrap ALL mutating API calls in the Executor to enforce DRY_RUN!
+       // _ = c.exec.Run("create Pi-hole record", func() error {
+       //     return myAPIClient.CreateRecord(...)
+       // }, "host", "example.com")
+
        return nil
    }
    ```
 
 **4. Register your provider (`cmd/companion/main.go`)**
-Initialize your provider in the orchestrator. For DNS providers, add a case to the appropriate pipeline `switch` statement. For monitoring, append it directly to the processor list:
+Initialize your provider in the orchestrator. For DNS providers, add a case to the appropriate pipeline `switch` statement. For monitoring, append it directly to the processor list. **Remember to pass the global `exec` parameter:**
    ```go
    switch cfg.Internal.Provider {
    // ... existing providers ...
    case "pihole":
        slog.Debug("Booting Pi-hole Provider...")
-       if ph := pihole.New(); ph != nil {
+       if ph := pihole.New(exec); ph != nil {
            processors = append(processors, ph)
        }
    }
@@ -135,4 +141,5 @@ Update the `README.md` to document any new environment variables your provider r
 ### Go Architecture & Style
 * All Go code must be formatted using `gofmt`.
 * Ensure all HTTP response bodies are properly closed, wrapped in a `defer func()` to satisfy `errcheck` linters.
+* **Strict Dry Run Compliance:** All state-mutating actions (POST, PUT, DELETE) *must* be wrapped in the injected `core.Executor.Run()` method. This ensures the `DRY_RUN` flag is globally respected and standardizes our logging output. Never bypass the executor to make direct mutating HTTP calls.
 * **No Junk Drawers:** We strictly avoid generic `utils`, `helpers`, or `providers` packages. We use Capability-Driven Vertical Slices. Place code in a domain-specific package that describes *what* it does (e.g., `internal/dns/cloudflare`).
