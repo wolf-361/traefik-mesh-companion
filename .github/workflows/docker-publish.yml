@@ -8,4 +8,7 @@ on:
 
 jobs:
   call-docker-publish:
+    permissions:
+      contents: read
+      packages: write
     uses: wolf-infra/.github/.github/workflows/docker-publish.yml@main
