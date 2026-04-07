@@ -65,6 +65,9 @@ func main() {
 		slog.Warn("DRY RUN MODE ENABLED. No remote state will be altered.")
 	}
 
+	// Create the Global Executor
+	exec := core.NewExecutor(cfg.DryRun)
+
 	// --- Processor Assembly ---
 	var processors []core.Processor
 
@@ -73,7 +76,7 @@ func main() {
 		switch cfg.Internal.Provider {
 		case "netbird":
 			slog.Debug("Booting NetBird Provider (Internal)...")
-			if nb := netbird.New(&cfg.Internal, cfg.DryRun); nb != nil {
+			if nb := netbird.New(&cfg.Internal, exec); nb != nil {
 				if err := nb.Init(); err != nil {
 					slog.Error("Failed to initialize NetBird", "error", err)
 					os.Exit(1)
@@ -90,7 +93,7 @@ func main() {
 		switch cfg.External.Provider {
 		case "cloudflare":
 			slog.Debug("Booting Cloudflare Provider (External)...")
-			if cf := cloudflare.New(&cfg.External, cfg.DryRun); cf != nil {
+			if cf := cloudflare.New(&cfg.External, exec); cf != nil {
 				if err := cf.Init(); err != nil {
 					slog.Error("Failed to initialize Cloudflare", "error", err)
 					os.Exit(1)
@@ -104,7 +107,7 @@ func main() {
 
 	// Assemble Monitoring
 	slog.Debug("Checking for Uptime Kuma configuration...")
-	if kc := kuma.New(); kc != nil {
+	if kc := kuma.New(exec); kc != nil {
 		if err := kc.SyncState(); err != nil {
 			slog.Warn("Kuma initial sync failed, continuing anyway", "error", err)
 		}

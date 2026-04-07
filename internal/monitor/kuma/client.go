@@ -18,14 +18,15 @@ import (
 var _ core.Processor = (*Client)(nil)
 
 type Client struct {
-	cfg        *Config // Uses the local config struct now
+	cfg        *Config
+	exec       *core.Executor
 	http       *http.Client
-	tracked    map[string]bool // State cache: URL+Name -> exists
-	groupCache map[string]int  // State cache: GroupName -> ID
+	tracked    map[string]bool
+	groupCache map[string]int
 }
 
 // New initializes the Kuma client, loading its own config automatically.
-func New() *Client {
+func New(exec *core.Executor) *Client {
 	cfg := LoadConfig()
 	if cfg == nil {
 		slog.Debug("Uptime Kuma Client config not found, skipping initialization")
@@ -34,6 +35,7 @@ func New() *Client {
 
 	return &Client{
 		cfg:        cfg,
+		exec:       exec,
 		http:       &http.Client{Timeout: 10 * time.Second},
 		tracked:    make(map[string]bool),
 		groupCache: make(map[string]int),
@@ -189,58 +191,69 @@ func (c *Client) resolveGroupID(name string) (int, error) {
 		return id, nil
 	}
 
-	slog.Info("Creating new Uptime Kuma monitor group", "name", name)
+	var groupID int
+	err := c.exec.Run("create Uptime Kuma group", func() error {
+		groupPayload := map[string]interface{}{"type": "group", "name": name}
+		body, _ := json.Marshal(groupPayload)
 
-	groupPayload := map[string]interface{}{"type": "group", "name": name}
-	body, _ := json.Marshal(groupPayload)
+		req, _ := http.NewRequest(http.MethodPost, c.cfg.URL+"/api/monitor", bytes.NewBuffer(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.SetBasicAuth("", c.cfg.APIKey)
 
-	req, _ := http.NewRequest(http.MethodPost, c.cfg.URL+"/api/monitor", bytes.NewBuffer(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.SetBasicAuth("", c.cfg.APIKey)
+		resp, err := c.http.Do(req)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if closeErr := resp.Body.Close(); closeErr != nil {
+				slog.Debug("failed to close response body", "error", closeErr)
+			}
+		}()
 
-	resp, err := c.http.Do(req)
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("API returned status %d", resp.StatusCode)
+		}
+
+		var result MonitorResponse
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return fmt.Errorf("failed to parse group creation response: %w", err)
+		}
+
+		groupID = result.ID
+		return nil
+	}, "name", name)
+
 	if err != nil {
 		return 0, err
 	}
-	defer func() {
-		if closeErr := resp.Body.Close(); closeErr != nil {
-			slog.Debug("failed to close response body", "error", closeErr)
-		}
-	}()
 
-	var result MonitorResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return 0, fmt.Errorf("failed to parse group creation response: %w", err)
-	}
-
-	c.groupCache[name] = result.ID
-	return result.ID, nil
+	c.groupCache[name] = groupID
+	return groupID, nil
 }
 
 func (c *Client) AddMonitor(payload MonitorPayload) error {
-	body, _ := json.Marshal(payload)
+	return c.exec.Run("create Uptime Kuma monitor", func() error {
+		body, _ := json.Marshal(payload)
 
-	req, _ := http.NewRequest(http.MethodPost, c.cfg.URL+"/api/monitor", bytes.NewBuffer(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.SetBasicAuth("", c.cfg.APIKey)
+		req, _ := http.NewRequest(http.MethodPost, c.cfg.URL+"/api/monitor", bytes.NewBuffer(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.SetBasicAuth("", c.cfg.APIKey)
 
-	resp, err := c.http.Do(req)
-	if err != nil {
-		slog.Error("Failed to register Kuma monitor", "name", payload.Name, "error", err)
-		return err
-	}
-	defer func() {
-		if closeErr := resp.Body.Close(); closeErr != nil {
-			slog.Debug("failed to close response body", "error", closeErr)
+		resp, err := c.http.Do(req)
+		if err != nil {
+			return err
 		}
-	}()
+		defer func() {
+			if closeErr := resp.Body.Close(); closeErr != nil {
+				slog.Debug("failed to close response body", "error", closeErr)
+			}
+		}()
 
-	if resp.StatusCode == http.StatusOK {
-		slog.Info("Uptime Kuma monitor registered", "name", payload.Name, "url", payload.URL)
-		return nil
-	}
+		if resp.StatusCode == http.StatusOK {
+			return nil
+		}
 
-	resBody, _ := io.ReadAll(resp.Body)
-	slog.Debug("Kuma API response (non-200)", "status", resp.StatusCode, "body", string(resBody))
-	return nil
+		resBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("API returned %d: %s", resp.StatusCode, string(resBody))
+	}, "name", payload.Name, "url", payload.URL)
 }

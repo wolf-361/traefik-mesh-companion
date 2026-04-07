@@ -21,7 +21,7 @@ var _ core.Processor = (*Client)(nil)
 type Client struct {
 	nbCfg       *Config
 	pipelineCfg *config.Pipeline
-	dryRun      bool
+	exec        *core.Executor
 
 	httpClient *http.Client
 	zoneMap    map[string]string
@@ -33,8 +33,8 @@ type Client struct {
 	lastIgnored map[string]bool
 }
 
-// New initializes the client. It only requires the pipeline instructions and dry run state.
-func New(pipelineCfg *config.Pipeline, dryRun bool) *Client {
+// New initializes the client. It requires the pipeline instructions and the global executor.
+func New(pipelineCfg *config.Pipeline, exec *core.Executor) *Client {
 	nbCfg := LoadConfig()
 	if nbCfg == nil {
 		slog.Debug("NetBird configuration missing, skipping initialization")
@@ -44,7 +44,7 @@ func New(pipelineCfg *config.Pipeline, dryRun bool) *Client {
 	c := &Client{
 		nbCfg:       nbCfg,
 		pipelineCfg: pipelineCfg,
-		dryRun:      dryRun,
+		exec:        exec,
 		httpClient:  &http.Client{Timeout: 10 * time.Second},
 		zoneMap:     make(map[string]string),
 		hostRegex:   regexp.MustCompile(`Host\([` + "`" + `'](.+?)[` + "`" + `']\)`),
@@ -275,57 +275,62 @@ func (c *Client) matchFilter(labelValue string, envFilter string) bool {
 }
 
 func (c *Client) upsertRecord(method, recordID, host, ip, zoneID string) {
-	if c.dryRun {
-		slog.Info("[DRY RUN] Would sync NetBird record", "method", method, "host", host, "target", ip)
-		return
-	}
-
-	rec := Record{Name: host, Type: "A", Content: ip, TTL: 300}
-	body, _ := json.Marshal(rec)
-
-	url := fmt.Sprintf("%s/dns/zones/%s/records", c.nbCfg.APIURL, zoneID)
+	action := "create NetBird record"
 	if method == http.MethodPut {
-		url = fmt.Sprintf("%s/%s", url, recordID)
+		action = "update NetBird record"
 	}
 
-	req, _ := http.NewRequest(method, url, bytes.NewBuffer(body))
-	req.Header.Add("Authorization", "Token "+c.nbCfg.Token)
-	req.Header.Add("Content-Type", "application/json")
+	_ = c.exec.Run(action, func() error {
+		rec := Record{Name: host, Type: "A", Content: ip, TTL: 300}
+		body, _ := json.Marshal(rec)
 
-	resp, err := c.httpClient.Do(req)
-	if err == nil && resp.StatusCode == http.StatusOK {
-		slog.Info("Synced NetBird record", "action", method, "host", host)
-	} else {
-		slog.Error("Failed to sync NetBird record", "host", host)
-	}
-	if resp != nil {
+		url := fmt.Sprintf("%s/dns/zones/%s/records", c.nbCfg.APIURL, zoneID)
+		if method == http.MethodPut {
+			url = fmt.Sprintf("%s/%s", url, recordID)
+		}
+
+		req, _ := http.NewRequest(method, url, bytes.NewBuffer(body))
+		req.Header.Add("Authorization", "Token "+c.nbCfg.Token)
+		req.Header.Add("Content-Type", "application/json")
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
 		defer func() {
 			if closeErr := resp.Body.Close(); closeErr != nil {
 				slog.Debug("failed to close response body", "error", closeErr)
 			}
 		}()
-	}
+
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("API returned status %d", resp.StatusCode)
+		}
+
+		return nil
+	}, "host", host, "target", ip)
 }
 
 func (c *Client) deleteRecord(recordID, host, zoneID string) {
-	if c.dryRun {
-		slog.Info("[DRY RUN] Would delete NetBird record", "host", host)
-		return
-	}
+	_ = c.exec.Run("delete NetBird record", func() error {
+		url := fmt.Sprintf("%s/dns/zones/%s/records/%s", c.nbCfg.APIURL, zoneID, recordID)
+		req, _ := http.NewRequest(http.MethodDelete, url, nil)
+		req.Header.Add("Authorization", "Token "+c.nbCfg.Token)
 
-	url := fmt.Sprintf("%s/dns/zones/%s/records/%s", c.nbCfg.APIURL, zoneID, recordID)
-	req, _ := http.NewRequest(http.MethodDelete, url, nil)
-	req.Header.Add("Authorization", "Token "+c.nbCfg.Token)
-
-	resp, err := c.httpClient.Do(req)
-	if err == nil && resp.StatusCode == http.StatusOK {
-		slog.Info("Cleaned up NetBird record", "host", host)
-	}
-	if resp != nil {
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
 		defer func() {
 			if closeErr := resp.Body.Close(); closeErr != nil {
 				slog.Debug("failed to close response body", "error", closeErr)
 			}
 		}()
-	}
+
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("API returned status %d", resp.StatusCode)
+		}
+
+		return nil
+	}, "host", host)
 }

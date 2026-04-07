@@ -20,21 +20,20 @@ var _ core.Processor = (*Client)(nil)
 type Client struct {
 	cfCfg       *Config
 	pipelineCfg *config.Pipeline
-	dryRun      bool
+	exec        *core.Executor
 
 	api     *cloudflare.API
-	zoneMap map[string]string // Maps root domain to its Zone ID
+	zoneMap map[string]string
 
 	filterRegex *regexp.Regexp
 	hostRegex   *regexp.Regexp
 
-	// State caching to prevent API spam
 	lastHosts   map[string]bool
 	lastIgnored map[string]bool
 }
 
-// New initializes the client. It only requires the pipeline instructions and dry run state.
-func New(pipelineCfg *config.Pipeline, dryRun bool) *Client {
+// New initializes the client. It requires the pipeline instructions and the global executor.
+func New(pipelineCfg *config.Pipeline, exec *core.Executor) *Client {
 	cfCfg := LoadConfig()
 	if cfCfg == nil {
 		slog.Debug("Cloudflare configuration missing, skipping initialization")
@@ -44,7 +43,7 @@ func New(pipelineCfg *config.Pipeline, dryRun bool) *Client {
 	c := &Client{
 		cfCfg:       cfCfg,
 		pipelineCfg: pipelineCfg,
-		dryRun:      dryRun,
+		exec:        exec,
 		zoneMap:     make(map[string]string),
 		hostRegex:   regexp.MustCompile(`Host\([` + "`" + `'](.+?)[` + "`" + `']\)`),
 	}
@@ -81,7 +80,6 @@ func (c *Client) Init() error {
 	return nil
 }
 
-// Process satisfies the core.Processor interface.
 func (c *Client) Process(services []core.Service) error {
 	activeHosts := make(map[string]bool)
 	ignoredHosts := make(map[string]bool)
@@ -206,38 +204,26 @@ func (c *Client) syncZone(ctx context.Context, zoneID string, activeHosts map[st
 			if rec.Name == host {
 				exists = true
 				if rec.Content != target || rec.Type != recordType {
-					if c.dryRun {
-						slog.Info("[DRY RUN] Would update Cloudflare record", "host", host, "target", target)
-					} else {
+					_ = c.exec.Run("update Cloudflare record", func() error {
 						params := cloudflare.UpdateDNSRecordParams{
 							ID: rec.ID, Type: recordType, Name: host, Content: target, Proxied: &proxied, TTL: 1,
 						}
 						_, err := c.api.UpdateDNSRecord(ctx, rc, params)
-						if err != nil {
-							slog.Error("Failed to update Cloudflare record", "host", host, "error", err)
-						} else {
-							slog.Info("Updated Cloudflare record", "host", host)
-						}
-					}
+						return err
+					}, "host", host, "target", target)
 				}
 				break
 			}
 		}
 
 		if !exists {
-			if c.dryRun {
-				slog.Info("[DRY RUN] Would create Cloudflare record", "host", host, "target", target)
-			} else {
+			_ = c.exec.Run("create Cloudflare record", func() error {
 				params := cloudflare.CreateDNSRecordParams{
 					Type: recordType, Name: host, Content: target, Proxied: &proxied, TTL: 1,
 				}
 				_, err := c.api.CreateDNSRecord(ctx, rc, params)
-				if err != nil {
-					slog.Error("Failed to create Cloudflare record", "host", host, "error", err)
-				} else {
-					slog.Info("Created Cloudflare record", "host", host)
-				}
-			}
+				return err
+			}, "host", host, "target", target)
 		}
 	}
 
@@ -245,16 +231,9 @@ func (c *Client) syncZone(ctx context.Context, zoneID string, activeHosts map[st
 		for _, rec := range records {
 			if !activeHosts[rec.Name] && !ignoredHosts[rec.Name] {
 				if rec.Content == target && rec.Type == recordType {
-					if c.dryRun {
-						slog.Info("[DRY RUN] Would delete Cloudflare record", "host", rec.Name)
-					} else {
-						err := c.api.DeleteDNSRecord(ctx, rc, rec.ID)
-						if err != nil {
-							slog.Error("Failed to delete Cloudflare record", "host", rec.Name, "error", err)
-						} else {
-							slog.Info("Cleaned up Cloudflare record", "host", rec.Name)
-						}
-					}
+					_ = c.exec.Run("delete Cloudflare record", func() error {
+						return c.api.DeleteDNSRecord(ctx, rc, rec.ID)
+					}, "host", rec.Name)
 				}
 			}
 		}
