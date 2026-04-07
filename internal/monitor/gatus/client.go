@@ -55,7 +55,11 @@ func (c *Client) SyncState() error {
 	if err != nil {
 		return fmt.Errorf("connection failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("failed to close response body", "error", closeErr)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("api returned status %d", resp.StatusCode)
@@ -165,7 +169,11 @@ func (c *Client) AddEndpoint(payload EndpointPayload) error {
 		if err != nil {
 			return err
 		}
-		defer resp.Body.Close()
+		defer func() {
+			if closeErr := resp.Body.Close(); closeErr != nil {
+				slog.Debug("failed to close response body", "error", closeErr)
+			}
+		}()
 
 		if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated {
 			return nil
