@@ -5,31 +5,7 @@ on:
     branches: ["main"]
 
 jobs:
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version: "1.26.1"
-
-      - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v9
-        with:
-          version: latest
-          args: --timeout=5m
-
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version: "1.26.1"
-
-      - name: Run unit tests
-        run: go test -v -race ./...
+  call-ci:
+    uses: wolf-infra/.github/.github/workflows/go-ci.yml@main
+    with:
+      go_version: "1.26.1"
