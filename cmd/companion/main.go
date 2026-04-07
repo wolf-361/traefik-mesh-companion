@@ -12,9 +12,12 @@ import (
 	"time"
 
 	"github.com/wolf-361/traefik-mesh-companion/internal/config"
-	"github.com/wolf-361/traefik-mesh-companion/internal/docker"
-	"github.com/wolf-361/traefik-mesh-companion/internal/health"
-	"github.com/wolf-361/traefik-mesh-companion/internal/provider"
+	"github.com/wolf-361/traefik-mesh-companion/internal/core"
+	"github.com/wolf-361/traefik-mesh-companion/internal/dns/cloudflare"
+	"github.com/wolf-361/traefik-mesh-companion/internal/dns/netbird"
+	"github.com/wolf-361/traefik-mesh-companion/internal/monitor/kuma"
+	"github.com/wolf-361/traefik-mesh-companion/internal/server"
+	"github.com/wolf-361/traefik-mesh-companion/internal/watcher"
 )
 
 // setupLogger translates the string config into a global slog instance.
@@ -40,71 +43,102 @@ func setupLogger(level string) {
 }
 
 func main() {
+	// --- CLI Flags & Health Check ---
 	isHealthCheck := flag.Bool("health", false, "Run health check against the companion")
 	flag.Parse()
 
 	if *isHealthCheck {
-		if err := health.Check(); err != nil {
+		if err := server.Check(); err != nil {
 			fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
 			os.Exit(1)
 		}
 		os.Exit(0)
 	}
 
+	// --- Global Setup ---
 	cfg := config.Load()
-
 	setupLogger(cfg.LogLevel)
 
-	slog.Info("Starting Traefik Mesh Companion", "version", "1.0.0", "log_level", cfg.LogLevel)
-	slog.Info("Configuration loaded", "sync_interval", cfg.SyncInterval)
+	slog.Info("Starting Traefik Mesh Companion", "version", "1.1.0", "log_level", cfg.LogLevel)
 
-	// Initialize Provider Registry
-	providers := make(map[string]provider.DNSProvider)
-
-	if cfg.Netbird != nil {
-		slog.Debug("Booting NetBird Provider...")
-		nb := &provider.NetbirdProvider{}
-		if err := nb.Init(cfg); err != nil {
-			slog.Error("Failed to initialize NetBird", "error", err)
-			os.Exit(1)
-		}
-		providers["netbird"] = nb
+	if cfg.DryRun {
+		slog.Warn("DRY RUN MODE ENABLED. No remote state will be altered.")
 	}
 
-	if cfg.Cloudflare != nil {
-		slog.Debug("Booting Cloudflare Provider...")
-		cf := &provider.CloudflareProvider{}
-		if err := cf.Init(cfg); err != nil {
-			slog.Error("Failed to initialize Cloudflare", "error", err)
-			os.Exit(1)
+	// Create the Global Executor
+	exec := core.NewExecutor(cfg.DryRun)
+
+	// --- Processor Assembly ---
+	var processors []core.Processor
+
+	// Assemble Internal Pipeline (DNS)
+	if cfg.Internal.Enabled {
+		switch cfg.Internal.Provider {
+		case "netbird":
+			slog.Debug("Booting NetBird Provider (Internal)...")
+			if nb := netbird.New(&cfg.Internal, exec); nb != nil {
+				if err := nb.Init(); err != nil {
+					slog.Error("Failed to initialize NetBird", "error", err)
+					os.Exit(1)
+				}
+				processors = append(processors, nb)
+			}
+		default:
+			slog.Warn("Unknown internal provider requested", "provider", cfg.Internal.Provider)
 		}
-		providers["cloudflare"] = cf
+	}
+
+	// Assemble External Pipeline (DNS)
+	if cfg.External.Enabled {
+		switch cfg.External.Provider {
+		case "cloudflare":
+			slog.Debug("Booting Cloudflare Provider (External)...")
+			if cf := cloudflare.New(&cfg.External, exec); cf != nil {
+				if err := cf.Init(); err != nil {
+					slog.Error("Failed to initialize Cloudflare", "error", err)
+					os.Exit(1)
+				}
+				processors = append(processors, cf)
+			}
+		default:
+			slog.Warn("Unknown external provider requested", "provider", cfg.External.Provider)
+		}
+	}
+
+	// Assemble Monitoring
+	slog.Debug("Checking for Uptime Kuma configuration...")
+	if kc := kuma.New(exec); kc != nil {
+		if err := kc.SyncState(); err != nil {
+			slog.Warn("Kuma initial sync failed, continuing anyway", "error", err)
+		}
+		processors = append(processors, kc)
 	}
 
 	// Sanity Check
-	if len(providers) == 0 {
-		slog.Error("No providers enabled. Please configure an INTERNAL_PROVIDER or EXTERNAL_PROVIDER.")
+	if len(processors) == 0 {
+		slog.Error("No processors enabled or configured correctly. Please check your environment variables.")
 		os.Exit(1)
 	}
 
-	// Initialize and Start the Docker Watcher
-	watcher, err := docker.NewWatcher(cfg, providers)
+	// --- Watcher Initialization ---
+	w, err := watcher.NewWatcher(cfg, processors)
 	if err != nil {
 		slog.Error("Failed to initialize Docker watcher", "error", err)
 		os.Exit(1)
 	}
 
-	healthServer := health.NewServer()
+	// --- Background Services ---
+	healthServer := server.NewServer()
 	go func() {
-		slog.Debug("Starting background health server", "port", health.Port)
+		slog.Debug("Starting background health server", "port", server.Port)
 		if err := healthServer.Start(); err != nil {
 			slog.Error("Health server crashed", "error", err)
 		}
 	}()
 
-	go watcher.Start()
+	go w.Start()
 
-	// Graceful Shutdown Trap
+	// --- Graceful Shutdown ---
 	stopChan := make(chan os.Signal, 1)
 	signal.Notify(stopChan, os.Interrupt, syscall.SIGTERM)
 
@@ -114,6 +148,7 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
 	if err := healthServer.Stop(ctx); err != nil {
 		slog.Error("Failed to stop health server cleanly", "error", err)
 	}
