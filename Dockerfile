@@ -1,40 +1,40 @@
 # --- Stage 1: Builder ---
-FROM golang:1.26-alpine AS builder
+FROM golang:1.26.1-alpine AS builder
 
-# Install git and certificates (needed for HTTPS calls to APIs)
-RUN apk add --no-cache git ca-certificates tzdata && update-ca-certificates
+RUN apk add --no-cache git ca-certificates tzdata
 WORKDIR /app
 
-# Copy and download dependencies first (leveraging Docker cache)
+# Create the non-root user
+RUN adduser -D -u 1000 wolf
+
 COPY go.mod go.sum ./
 RUN go mod download
-
-# Copy the rest of the source code
 COPY . .
 
-# Build the binary
-# CGO_ENABLED=0 ensures a static binary that runs on 'scratch'
-# -ldflags="-s -w" strips debug information to reduce size
+# Build static binary
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o companion ./cmd/companion/main.go
 
 # --- Stage 2: Final Image ---
 FROM scratch
 
-# Copy the timezone database from the builder
-COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
+# Transfer user/group (so "USER wolf" works)
+COPY --from=builder /etc/passwd /etc/passwd
+COPY --from=builder /etc/group /etc/group
 
-# Copy SSL certificates from builder
+# Transfer SSL Certs (Essential for Cloudflare/NetBird)
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
-# Copy the compiled binary
+# Transfer Timezone info
+COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
+ENV TZ=America/Montreal
+
+# Transfer the binary
 COPY --from=builder /app/companion /companion
 
-# Run as a non-privileged user for security
-USER 1000:1000
+USER wolf
 
-# Call our own binary with the health flag every 30 seconds
+# Ensure your Go code in cmd/companion/main.go handles a -health flag!
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD ["/companion", "-health"]
 
-# Set the entrypoint
 ENTRYPOINT ["/companion"]
