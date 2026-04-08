@@ -144,5 +144,15 @@ func (c *Client) buildHTTPMonitor(svc core.Service) *monitor.HTTP {
 		mon.URL = val
 	}
 
+	if val := labels["mesh.kuma.description"]; val != "" {
+		mon.Description = &val
+	}
+	if val := labels["mesh.kuma.ignore_tls"]; val != "" {
+		mon.IgnoreTLS = strings.ToLower(val) == "true"
+	}
+	if val := labels["mesh.kuma.method"]; val != "" {
+		mon.Method = strings.ToUpper(val)
+	}
+
 	return mon
 }
