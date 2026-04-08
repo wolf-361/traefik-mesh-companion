@@ -23,13 +23,13 @@ jobs:
     steps:
       - name: Generate Bot Token
         id: generate-token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.BOT_APP_ID }}
           private-key: ${{ secrets.BOT_PRIVATE_KEY }}
           
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           token: ${{ steps.generate-token.outputs.token }}
           persist-credentials: false 
@@ -42,18 +42,22 @@ jobs:
           GO_VER=$(grep "^go " go.mod | awk '{print $2}')
           echo "go_version=$GO_VER" >> $GITHUB_OUTPUT
 
-          # Get Release Version
-          # If it's a tag, use the tag. If it's main, use 'latest'
+          # Always use the actual version number for the badge
           if [[ $GITHUB_REF == refs/tags/* ]]; then
+            # If pushing a new tag, use that exact tag (e.g., v1.0.2)
             REL_VER=${GITHUB_REF#refs/tags/}
+            PULL_TAG=$REL_VER
           else
-            REL_VER="latest"
+            # If pushing to main, ask git for the most recent tag (e.g., v1.0.1)
+            REL_VER=$(git describe --tags --abbrev=0)
+            # But pull the 'latest' image so the Size badge reflects the current commit
+            PULL_TAG="latest"
           fi
+          
           echo "release_version=$REL_VER" >> $GITHUB_OUTPUT
 
           # Get Docker Image Size
-          # We pull the image we just built to get the real size
-          IMAGE_NAME="ghcr.io/${{ github.repository }}:latest"
+          IMAGE_NAME="ghcr.io/${{ github.repository }}:$PULL_TAG"
           docker pull $IMAGE_NAME
           SIZE=$(docker images $IMAGE_NAME --format "{{.Size}}")
           echo "docker_size=$SIZE" >> $GITHUB_OUTPUT
@@ -80,3 +84,19 @@ jobs:
             git remote set-url origin https://x-access-token:${{ steps.generate-token.outputs.token }}@github.com/${{ github.repository }}.git
             git push origin main
           fi
+  create-release:
+    # Only run this job if the push was a tag starting with 'v'
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [call-docker-publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v6
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          make_latest: true
