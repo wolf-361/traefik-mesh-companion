@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
-	"time"
 
 	kumaClient "github.com/breml/go-uptime-kuma-client"
 	"github.com/breml/go-uptime-kuma-client/monitor"
@@ -29,10 +28,9 @@ func New(exec *core.Executor) *Client {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	client, err := kumaClient.New(ctx, cfg.URL, cfg.Username, cfg.Password)
+	// We MUST use context.Background() here.
+	// The socket.io client uses this context to keep the WebSocket alive permanently.
+	client, err := kumaClient.New(context.Background(), cfg.URL, cfg.Username, cfg.Password)
 	if err != nil {
 		slog.Error("Failed to connect to Uptime Kuma Socket.io", "error", err)
 		return nil

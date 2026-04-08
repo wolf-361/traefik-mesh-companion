@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -21,6 +22,9 @@ import (
 	"github.com/wolf-361/traefik-mesh-companion/internal/server"
 	"github.com/wolf-361/traefik-mesh-companion/internal/watcher"
 )
+
+// Version is injected during the Docker build process via ldflags
+var Version = "dev"
 
 // setupLogger translates the string config into a global slog instance.
 func setupLogger(level string) {
@@ -61,7 +65,12 @@ func main() {
 	cfg := config.Load()
 	setupLogger(cfg.LogLevel)
 
-	slog.Info("Starting Traefik Mesh Companion", "version", "1.1.0", "log_level", cfg.LogLevel)
+	// --- Shared Application State ---
+	// Used by the background health server to report readiness
+	isHealthy := &atomic.Bool{}
+	isHealthy.Store(true) // Assume healthy on boot
+
+	slog.Info("Starting Traefik Mesh Companion", "version", Version, "log_level", cfg.LogLevel)
 
 	if cfg.DryRun {
 		slog.Warn("DRY RUN MODE ENABLED. No remote state will be altered.")
@@ -110,9 +119,7 @@ func main() {
 	// Assemble Monitoring
 	slog.Debug("Checking for Monitoring configuration...")
 
-	// Use our new shared interface
 	var monitorClient monitor.Provider
-
 	switch cfg.MonitorProvider {
 	case "gatus":
 		slog.Debug("Booting Gatus Provider...")
@@ -126,30 +133,33 @@ func main() {
 		slog.Warn("Unknown monitoring provider requested", "provider", cfg.MonitorProvider)
 	}
 
-	// If a client was successfully initialized, run the sync and attach it
 	if monitorClient != nil {
 		if err := monitorClient.SyncState(); err != nil {
 			slog.Warn("Initial monitor sync failed, continuing anyway", "error", err, "provider", cfg.MonitorProvider)
 		}
-		// Because monitor.Provider embeds core.Processor, we can safely append it!
 		processors = append(processors, monitorClient)
 	}
 
-	// Sanity Check
 	if len(processors) == 0 {
 		slog.Error("No processors enabled or configured correctly. Please check your environment variables.")
 		os.Exit(1)
 	}
 
 	// --- Watcher Initialization ---
-	w, err := watcher.NewWatcher(cfg, processors)
+	// We pass isHealthy to the watcher so it can flip the switch if the Docker connection drops
+	w, err := watcher.NewWatcher(cfg, processors, isHealthy)
 	if err != nil {
 		slog.Error("Failed to initialize Docker watcher", "error", err)
 		os.Exit(1)
 	}
 
 	// --- Background Services ---
-	healthServer := server.NewServer()
+	healthServer := server.NewServer(
+		slog.Default(),
+		Version,
+		isHealthy,
+	)
+
 	go func() {
 		slog.Debug("Starting background health server", "port", server.Port)
 		if err := healthServer.Start(); err != nil {
@@ -166,6 +176,9 @@ func main() {
 	<-stopChan
 
 	slog.Info("Shutting down Traefik Mesh Companion safely...")
+
+	// Mark as unhealthy the second we receive the shutdown signal
+	isHealthy.Store(false)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

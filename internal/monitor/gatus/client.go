@@ -13,7 +13,6 @@ import (
 	"github.com/wolf-361/traefik-mesh-companion/internal/core"
 )
 
-// Ensure Client implements the core.Processor interface at compile time
 var _ core.Processor = (*Client)(nil)
 
 type Client struct {
@@ -23,7 +22,6 @@ type Client struct {
 	tracked map[string]bool
 }
 
-// New initializes the Gatus client, loading its own config automatically.
 func New(exec *core.Executor) *Client {
 	cfg := LoadConfig()
 	if cfg == nil {
@@ -48,10 +46,9 @@ func (c *Client) SyncState() error {
 
 	slog.Info("Syncing existing state from Gatus Bridge...")
 
-	// Call our new GET /api/v1/endpoints
 	req, _ := http.NewRequest(http.MethodGet, c.cfg.BridgeURL+"/api/v1/endpoints", nil)
 	if c.cfg.APIKey != "" {
-		req.Header.Set("X-API-Key", c.cfg.APIKey)
+		req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey) // <-- Auth Fixed!
 	}
 
 	resp, err := c.http.Do(req)
@@ -68,13 +65,12 @@ func (c *Client) SyncState() error {
 		return fmt.Errorf("api returned status %d", resp.StatusCode)
 	}
 
-	var endpoints []EndpointPayload
+	var endpoints []GatusEndpoint
 	if err := json.NewDecoder(resp.Body).Decode(&endpoints); err != nil {
 		return fmt.Errorf("failed to decode response: %w", err)
 	}
 
 	for _, ep := range endpoints {
-		// Use Group + Name as the unique cache key
 		cacheKey := ep.Group + "/" + ep.Name
 		c.tracked[cacheKey] = true
 	}
@@ -87,6 +83,9 @@ func (c *Client) Process(services []core.Service) error {
 	if c.cfg == nil {
 		return nil
 	}
+
+	// Track what we see in THIS sync cycle to detect orphans
+	activeKeys := make(map[string]bool)
 
 	for _, svc := range services {
 		gatusEnabled := c.cfg.AutoEnable
@@ -101,13 +100,14 @@ func (c *Client) Process(services []core.Service) error {
 		payload := c.buildPayload(svc)
 
 		if payload.URL == "" || payload.URL == "https://" {
-			slog.Debug("Skipping Gatus monitor: no valid URL found", "container", svc.ContainerName)
 			continue
 		}
 
 		cacheKey := payload.Group + "/" + payload.Name
+		activeKeys[cacheKey] = true
+
 		if c.tracked[cacheKey] {
-			continue // Already exists in Gatus, skip HTTP call
+			continue
 		}
 
 		if err := c.AddEndpoint(payload); err == nil {
@@ -115,23 +115,65 @@ func (c *Client) Process(services []core.Service) error {
 		}
 	}
 
+	// --- ORPHAN CLEANUP LOGIC ---
+	// If it's in c.tracked but not in activeKeys, the container died!
+	for trackedKey := range c.tracked {
+		if !activeKeys[trackedKey] {
+			parts := strings.SplitN(trackedKey, "/", 2)
+			if len(parts) == 2 {
+				group, name := parts[0], parts[1]
+				if err := c.DeleteEndpoint(name, group); err == nil {
+					delete(c.tracked, trackedKey) // Remove from cache so we don't try again
+				}
+			}
+		}
+	}
+
 	return nil
 }
 
-func (c *Client) buildPayload(svc core.Service) EndpointPayload {
+// --- RESTORED 1.0.0 ADVANCED STRUCTS ---
+type GatusEndpoint struct {
+	Name       string            `json:"name"`
+	Group      string            `json:"group"`
+	URL        string            `json:"url"`
+	Method     string            `json:"method"`
+	Interval   string            `json:"interval"`
+	Conditions []string          `json:"conditions"`
+	Headers    map[string]string `json:"headers,omitempty"`
+	Body       string            `json:"body,omitempty"`
+	Client     *GatusClient      `json:"client,omitempty"`
+	UI         *GatusUI          `json:"ui,omitempty"`
+}
+
+type GatusClient struct {
+	Insecure bool `json:"insecure"`
+}
+
+type GatusUI struct {
+	HideHostname bool   `json:"hideHostname,omitempty"`
+	HideURL      bool   `json:"hideURL,omitempty"`
+	Description  string `json:"description,omitempty"`
+}
+
+func (c *Client) buildPayload(svc core.Service) GatusEndpoint {
 	labels := svc.Labels
 
-	// Sane defaults
-	payload := EndpointPayload{
-		Name:  svc.ContainerName,
-		Group: "infrastructure",
+	payload := GatusEndpoint{
+		Name:     svc.ContainerName,
+		Group:    "Infrastructure",
+		Method:   "GET",
+		Interval: "60s",
+		Conditions: []string{
+			"[STATUS] == 200",
+			"[RESPONSE_TIME] < 500",
+		},
 	}
 
 	if len(svc.Hosts) > 0 {
 		payload.URL = "https://" + svc.Hosts[0]
 	}
 
-	// Override with labels
 	if val := labels["mesh.gatus.name"]; val != "" {
 		payload.Name = val
 	}
@@ -147,9 +189,11 @@ func (c *Client) buildPayload(svc core.Service) EndpointPayload {
 	if val := labels["mesh.gatus.interval"]; val != "" {
 		payload.Interval = val
 	}
+	if val := labels["mesh.gatus.body"]; val != "" {
+		payload.Body = val
+	}
+
 	if val := labels["mesh.gatus.conditions"]; val != "" {
-		// Gatus expects an array of strings, so we split by comma
-		// e.g., "[STATUS] == 200,[RESPONSE_TIME] < 500"
 		parts := strings.Split(val, ",")
 		for i := range parts {
 			parts[i] = strings.TrimSpace(parts[i])
@@ -157,18 +201,41 @@ func (c *Client) buildPayload(svc core.Service) EndpointPayload {
 		payload.Conditions = parts
 	}
 
+	if val := labels["mesh.gatus.insecure"]; val != "" {
+		if strings.ToLower(val) == "true" {
+			payload.Client = &GatusClient{Insecure: true}
+		}
+	}
+
+	if val := labels["mesh.gatus.ui.description"]; val != "" {
+		if payload.UI == nil {
+			payload.UI = &GatusUI{}
+		}
+		payload.UI.Description = val
+	}
+
+	if val := labels["mesh.gatus.headers"]; val != "" {
+		payload.Headers = make(map[string]string)
+		pairs := strings.Split(val, ",")
+		for _, pair := range pairs {
+			parts := strings.SplitN(pair, ":", 2)
+			if len(parts) == 2 {
+				payload.Headers[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+			}
+		}
+	}
+
 	return payload
 }
 
-func (c *Client) AddEndpoint(payload EndpointPayload) error {
+func (c *Client) AddEndpoint(payload GatusEndpoint) error {
 	return c.exec.Run("create Gatus endpoint", func() error {
 		body, _ := json.Marshal(payload)
 
-		// POST to our new API
 		req, _ := http.NewRequest(http.MethodPost, c.cfg.BridgeURL+"/api/v1/endpoints", bytes.NewBuffer(body))
 		req.Header.Set("Content-Type", "application/json")
 		if c.cfg.APIKey != "" {
-			req.Header.Set("X-API-Key", c.cfg.APIKey)
+			req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey) // <-- Auth Fixed!
 		}
 
 		resp, err := c.http.Do(req)
@@ -188,4 +255,35 @@ func (c *Client) AddEndpoint(payload EndpointPayload) error {
 		resBody, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("bridge returned %d: %s", resp.StatusCode, string(resBody))
 	}, "name", payload.Name, "group", payload.Group)
+}
+
+// --- NEW ORPHAN CLEANUP METHOD ---
+func (c *Client) DeleteEndpoint(name, group string) error {
+	return c.exec.Run("delete Gatus endpoint", func() error {
+		// Pass name and group as URL query parameters
+		url := fmt.Sprintf("%s/api/v1/endpoints?name=%s&group=%s", c.cfg.BridgeURL, name, group)
+
+		req, _ := http.NewRequest(http.MethodDelete, url, nil)
+		if c.cfg.APIKey != "" {
+			req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
+		}
+
+		resp, err := c.http.Do(req)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if closeErr := resp.Body.Close(); closeErr != nil {
+				slog.Debug("failed to close response body", "error", closeErr)
+			}
+		}()
+
+		if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNotFound {
+			// If it's 404 Not Found, Gatus already forgot about it, so we consider it a success
+			return nil
+		}
+
+		resBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("bridge returned %d: %s", resp.StatusCode, string(resBody))
+	}, "name", name, "group", group)
 }

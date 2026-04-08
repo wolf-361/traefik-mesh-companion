@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
@@ -20,9 +21,10 @@ type Watcher struct {
 	cfg        *config.Config
 	processors []core.Processor
 	hostRegex  *regexp.Regexp
+	isHealthy  *atomic.Bool
 }
 
-func NewWatcher(cfg *config.Config, processors []core.Processor) (*Watcher, error) {
+func NewWatcher(cfg *config.Config, processors []core.Processor, isHealthy *atomic.Bool) (*Watcher, error) {
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		return nil, err
@@ -33,6 +35,7 @@ func NewWatcher(cfg *config.Config, processors []core.Processor) (*Watcher, erro
 		cfg:        cfg,
 		processors: processors,
 		hostRegex:  regexp.MustCompile(`Host\([` + "`" + `'](.+?)[` + "`" + `']\)`),
+		isHealthy:  isHealthy,
 	}, nil
 }
 
@@ -55,6 +58,7 @@ func (w *Watcher) Start() {
 		select {
 		case err := <-errs:
 			slog.Error("Docker event stream error", "error", err)
+			w.isHealthy.Store(false)
 			time.Sleep(5 * time.Second)
 		case msg := <-msgs:
 			slog.Info("Container event triggered sync", "container", msg.Actor.Attributes["name"], "action", msg.Action)
@@ -69,8 +73,12 @@ func (w *Watcher) SyncAll() {
 	containers, err := w.cli.ContainerList(context.Background(), container.ListOptions{All: true})
 	if err != nil {
 		slog.Error("Error listing containers", "error", err)
+		w.isHealthy.Store(false)
 		return
 	}
+
+	// If we successfully communicated with Docker, we are healthy!
+	w.isHealthy.Store(true)
 
 	var services []core.Service
 
