@@ -1,6 +1,6 @@
 # Traefik Mesh Companion
 
-![Docker Size](https://img.shields.io/badge/size-12.4MB-blue)
+![Docker Size](https://img.shields.io/badge/size-10.1MB-blue)
 ![Go Version](https://img.shields.io/badge/Go-1.26.1-00ADD8)
 ![Version](https://img.shields.io/github/v/release/wolf-infra/traefik-mesh-companion?color=orange)
 ![License](https://img.shields.io/badge/license-GNU%20GPLv3-green)
