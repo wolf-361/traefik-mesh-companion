@@ -21,6 +21,13 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Generate Bot Token
+        id: generate-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_PRIVATE_KEY }}
+          
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
@@ -60,14 +67,13 @@ jobs:
 
       - name: Commit and Push
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "Wolf-Infrastructure-Bot[bot]"
+          git config --global user.email "Wolf-Infrastructure-Bot[bot]@users.noreply.github.com"
           
-          # Only commit if there are actual changes
           if git diff --quiet README.md; then
-            echo "No changes to README badges."
+            echo "No changes."
           else
             git add README.md
-            git commit -m "docs: update badges for ${{ steps.metrics.outputs.release_version }} [skip ci]"
+            git commit -m "docs: automate badge updates [skip ci]"
             git push origin main
           fi
