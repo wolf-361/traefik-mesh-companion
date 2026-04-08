@@ -13,9 +13,12 @@ type Pipeline struct {
 
 // Config holds ONLY the universal application settings.
 type Config struct {
-	LogLevel     string
-	DryRun       bool
+	LogLevel string
+	DryRun   bool
+
 	SyncInterval time.Duration
-	Internal     Pipeline
-	External     Pipeline
+
+	Internal        Pipeline
+	External        Pipeline
+	MonitorProvider string
 }
