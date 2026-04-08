@@ -1,7 +1,8 @@
 # Traefik Mesh Companion
 
-![Docker Size](https://img.shields.io/badge/size-10.2MB-blue)
+![Docker Size](https://img.shields.io/badge/size-12.4MB-blue)
 ![Go Version](https://img.shields.io/badge/Go-1.26.1-00ADD8)
+![Version](https://img.shields.io/github/v/release/wolf-infra/traefik-mesh-companion?color=orange)
 ![License](https://img.shields.io/badge/license-GNU%20GPLv3-green)
 
 Traefik Mesh Companion is a lightweight, automated synchronizer for Traefik. It monitors the local Docker socket and automatically synchronizes Traefik routing labels to external DNS providers, Mesh VPN networks, and Uptime Monitoring services.
@@ -54,8 +55,9 @@ services:
       - CLOUDFLARE_TARGET_DOMAIN=your-tunnel-uuid.cfargotunnel.com
 
       # --- Monitoring (Uptime Kuma) ---
-      - KUMA_URL=http://uptime-kuma:3001
-      - KUMA_API_KEY=your_kuma_api_key
+      - KUMA_URL=http://kuma.your-adress.ca
+      - KUMA_USERNAME=admin
+      - KUMA_PASSWORD=${KUMA_PASS}
       - KUMA_AUTO_ENABLE=true
 ```
 > **Security Note:** For production deployments, it is highly recommended to use a Docker Socket Proxy (like `tecnativa/docker-socket-proxy`) instead of mounting `/var/run/docker.sock` directly. Set `DOCKER_HOST="tcp://proxy:2375"` in your environment variables to connect.
@@ -91,6 +93,7 @@ services:
 | :--- | :--- | :--- |
 | `SYNC_INTERVAL` | `1m` | Interval for the full background synchronization loop. |
 | `DRY_RUN` | `false` | If true, logs API actions instead of executing them. |
+| `LOG_LEVEL` | `info` | Logging verbosity (`debug`, `info`, `warn`, `error`). |
 | `INTERNAL_PROVIDER` | `netbird` | Provider for the internal network. Set to `none` to disable. |
 | `INTERNAL_FILTER` | `traefik` | The Traefik label value that triggers an internal sync. |
 | `INTERNAL_FILTER_LABEL` | `traefik.http.routers.*.entrypoints` | The Traefik label pattern to monitor for the internal pipeline. |
@@ -115,29 +118,67 @@ services:
 | `CLOUDFLARE_API_TOKEN` | API Token with `Zone.DNS` edit permissions. |
 | `CLOUDFLARE_TARGET_DOMAIN` | The target destination. Use a CNAME (e.g., Argo Tunnel) or an IP address. |
 
+### Monitoring Providers
+
 #### Uptime Kuma
 | Variable | Description |
 | :--- | :--- |
+| `MONITOR_PROVIDER` | Set to `kuma` to enable. |
 | `KUMA_URL` | The base URL of your Uptime Kuma instance. |
-| `KUMA_API_KEY` | API Key for authenticating with Kuma. |
-| `KUMA_AUTO_ENABLE` | If `true`, automatically creates monitors for all discovered Traefik routers. If `false`, requires the `mesh.kuma.enable=true` label on the container. |
+| `KUMA_USERNAME` | Admin username for Socket.io authentication. |
+| `KUMA_PASSWORD` | Admin password. |
+| `KUMA_AUTO_ENABLE` | If `true`, monitors all discovered routers by default. |
+
+#### Gatus (via Gatus API Bridge)
+| Variable | Description |
+| :--- | :--- |
+| `MONITOR_PROVIDER` | Set to `gatus` to enable. |
+| `GATUS_BRIDGE_URL` | The URL of your Gatus API Bridge instance. |
+| `GATUS_API_KEY` | Bearer token for bridge authentication. |
+| `GATUS_AUTO_ENABLE` | If `true`, monitors all discovered routers by default. |
+
+---
 
 ## 🏷️ Manual Overrides & Labels
 
-You can fine-tune how the companion interacts with specific containers by adding these labels to your Docker services:
+You can fine-tune how the companion interacts with specific containers by adding these labels to your Docker services.
 
-### DNS Overrides
-* `traefik.http.routers.<name>.mesh.managed=false`: Forces the DNS pipelines to completely ignore this router (no records will be created or deleted).
+### 📊 Uptime Kuma Labels
+| Label | Default | Description |
+| :--- | :--- | :--- |
+| `mesh.kuma.enable` | `true/false` | Explicitly enable or disable Kuma monitoring. |
+| `mesh.kuma.name` | Container Name | Display name in the Kuma dashboard. |
+| `mesh.kuma.url` | `https://[Host]` | The endpoint URL to monitor. |
+| `mesh.kuma.group` | - | Assign to a group (created automatically if missing). |
+| `mesh.kuma.description` | - | Add a description to the monitor. |
+| `mesh.kuma.interval` | `60` | Check interval in seconds. |
+| `mesh.kuma.max_retries` | `3` | Number of retries before marking as down. |
+| `mesh.kuma.method` | `GET` | HTTP Method (`GET`, `POST`, `PUT`, etc.). |
+| `mesh.kuma.headers` | - | JSON string of headers (e.g., `{"X-Auth": "key"}`). |
+| `mesh.kuma.body` | - | Request body for POST/PUT methods. |
+| `mesh.kuma.max_redirects` | `0` | Number of HTTP redirects to follow. |
+| `mesh.kuma.accepted_status_codes` | `200-299` | Comma-separated list (e.g., `200,301,302`). |
+| `mesh.kuma.ignore_tls` | `false` | Set to `true` to skip SSL certificate validation. |
+| `mesh.kuma.upside_down` | `false` | Flip logic (Alert if the service is UP). |
 
-### Kuma Overrides
-If Kuma is configured, it automatically pulls the URL from the Traefik `Host()` rule. You can override its behavior with the following labels:
-* `mesh.kuma.enable`: `true`/`false` to explicitly enable or disable monitoring for this container.
-* `mesh.kuma.name`: Override the display name in Uptime Kuma (defaults to container name).
-* `mesh.kuma.group`: Assign the monitor to a specific group. The companion will automatically create the group in Kuma if it does not exist.
-* `mesh.kuma.url`: Override the endpoint URL to monitor.
-* `mesh.kuma.interval`: Check interval in seconds (default: 60).
-* `mesh.kuma.accepted_status_codes`: Comma-separated list of healthy HTTP codes (default: `200-299`).
-* `mesh.kuma.ignore_tls`: `true`/`false` to skip SSL certificate validation for this monitor.
+### 🐊 Gatus Labels
+| Label | Default | Description |
+| :--- | :--- | :--- |
+| `mesh.gatus.enable` | `true/false` | Explicitly enable or disable Gatus monitoring. |
+| `mesh.gatus.name` | Container Name | Display name in Gatus. |
+| `mesh.gatus.group` | `Infrastructure` | Logical grouping in the Gatus UI. |
+| `mesh.gatus.url` | `https://[Host]` | The endpoint URL to monitor. |
+| `mesh.gatus.interval` | `60s` | Check interval (Gatus format: `30s`, `5m`). |
+| `mesh.gatus.method` | `GET` | HTTP Method. |
+| `mesh.gatus.headers` | - | Comma-separated headers (e.g., `Host: app.local, X-Id: 1`). |
+| `mesh.gatus.conditions` | `[STATUS] == 200` | Comma-separated conditions for health. |
+| `mesh.gatus.insecure` | `false` | Set to `true` to skip TLS verification. |
+| `mesh.gatus.ui.description` | - | Tooltip description in the Gatus UI. |
+
+### 🌐 DNS & Global Overrides
+* `traefik.http.routers.<name>.mesh.managed=false`: Completely ignore this router for all pipelines.
+* `mesh.dns.internal`: `true/false` to force-enable/disable internal Mesh DNS sync.
+* `mesh.dns.external`: `true/false` to force-enable/disable public Cloudflare sync.
 
 ## 📦 Releases & Versioning
 

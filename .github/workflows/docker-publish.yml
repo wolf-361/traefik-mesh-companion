@@ -12,3 +12,62 @@ jobs:
       contents: read
       packages: write
     uses: wolf-infra/.github/.github/workflows/docker-publish.yml@main
+  
+  update-readme:
+    needs: [call-docker-publish]
+    # Only run this on main or tags to avoid PR noise
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          # Fetch all history so we can push back to main
+          fetch-depth: 0
+
+      - name: Calculate Metrics
+        id: metrics
+        run: |
+          # Get Go Version from go.mod
+          GO_VER=$(grep "^go " go.mod | awk '{print $2}')
+          echo "go_version=$GO_VER" >> $GITHUB_OUTPUT
+
+          # Get Release Version
+          # If it's a tag, use the tag. If it's main, use 'latest'
+          if [[ $GITHUB_REF == refs/tags/* ]]; then
+            REL_VER=${GITHUB_REF#refs/tags/}
+          else
+            REL_VER="latest"
+          fi
+          echo "release_version=$REL_VER" >> $GITHUB_OUTPUT
+
+          # Get Docker Image Size
+          # We pull the image we just built to get the real size
+          IMAGE_NAME="ghcr.io/${{ github.repository }}:latest"
+          docker pull $IMAGE_NAME
+          SIZE=$(docker images $IMAGE_NAME --format "{{.Size}}")
+          echo "docker_size=$SIZE" >> $GITHUB_OUTPUT
+
+      - name: Update README Badges
+        run: |
+          # Use sed to find the Shields.io patterns and swap them
+          # We use | as a delimiter in sed because the URLs contain /
+          sed -i "s/size-.*-blue/size-${{ steps.metrics.outputs.docker_size }}-blue/" README.md
+          sed -i "s/Go-.*-00ADD8/Go-${{ steps.metrics.outputs.go_version }}-00ADD8/" README.md
+          sed -i "s/version-.*-orange/version-${{ steps.metrics.outputs.release_version }}-orange/" README.md
+
+      - name: Commit and Push
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Only commit if there are actual changes
+          if git diff --quiet README.md; then
+            echo "No changes to README badges."
+          else
+            git add README.md
+            git commit -m "docs: update badges for ${{ steps.metrics.outputs.release_version }} [skip ci]"
+            git push origin main
+          fi
