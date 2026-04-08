@@ -157,17 +157,19 @@ func (c *Client) Process(services []core.Service) error {
 func (c *Client) buildHTTPMonitor(svc core.Service) *monitor.HTTP {
 	labels := svc.Labels
 
+	// Initialize with Global Defaults from Config
 	mon := &monitor.HTTP{
 		Base: monitor.Base{
 			Name:          svc.ContainerName,
-			Interval:      60,
-			MaxRetries:    3,
-			RetryInterval: 60,
+			Interval:      c.cfg.DefaultInterval,
+			MaxRetries:    c.cfg.DefaultMaxRetries,
+			RetryInterval: c.cfg.DefaultRetryInterval,
 			IsActive:      true,
 		},
 		HTTPDetails: monitor.HTTPDetails{
 			Method:              "GET",
-			AcceptedStatusCodes: []string{"200-299"},
+			AcceptedStatusCodes: c.cfg.DefaultAcceptedStatusCodes,
+			MaxRedirects:        c.cfg.DefaultMaxRedirects,
 			IgnoreTLS:           false,
 		},
 	}
