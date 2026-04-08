@@ -1,6 +1,7 @@
 package netbird
 
 import (
+	"log/slog"
 	"os"
 	"strings"
 )
@@ -16,13 +17,20 @@ type Config struct {
 func LoadConfig() *Config {
 	token := os.Getenv("NETBIRD_API_TOKEN")
 	target := os.Getenv("NETBIRD_TARGET_IP")
+	customURL := os.Getenv("NETBIRD_API_URL")
+
+	slog.Debug("Raw NetBird Environment Variables",
+		"target", target,
+		"custom_url", customURL,
+		"token_length", len(token),
+	)
 
 	if token == "" || target == "" {
 		return nil
 	}
 
 	apiURL := "https://api.netbird.io/api"
-	if customURL := os.Getenv("NETBIRD_API_URL"); customURL != "" {
+	if customURL != "" {
 		apiURL = customURL
 	}
 

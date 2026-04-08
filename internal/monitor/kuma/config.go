@@ -1,6 +1,9 @@
 package kuma
 
-import "os"
+import (
+	"log/slog"
+	"os"
+)
 
 // Config holds settings required specifically for Uptime Kuma.
 type Config struct {
@@ -15,6 +18,12 @@ func LoadConfig() *Config {
 	url := os.Getenv("KUMA_URL")
 	username := os.Getenv("KUMA_USERNAME")
 	password := os.Getenv("KUMA_PASSWORD")
+
+	slog.Debug("Raw Kuma Environment Variables",
+		"url", url,
+		"username", username,
+		"password_length", len(password),
+	)
 
 	if url == "" || username == "" || password == "" {
 		return nil

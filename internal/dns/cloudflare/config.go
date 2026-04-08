@@ -1,6 +1,9 @@
 package cloudflare
 
-import "os"
+import (
+	"log/slog"
+	"os"
+)
 
 // Config holds settings required specifically for Cloudflare.
 type Config struct {
@@ -12,6 +15,11 @@ type Config struct {
 func LoadConfig() *Config {
 	token := os.Getenv("CLOUDFLARE_API_TOKEN")
 	target := os.Getenv("CLOUDFLARE_TARGET_DOMAIN")
+
+	slog.Debug("Raw Cloudflare Environment Variables",
+		"target", target,
+		"token_length", len(token),
+	)
 
 	if token == "" || target == "" {
 		return nil

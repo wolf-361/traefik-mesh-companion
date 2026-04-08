@@ -1,6 +1,7 @@
 package config
 
 import (
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -30,6 +31,15 @@ func Load() *Config {
 		Cleanup:     strings.ToLower(os.Getenv("EXTERNAL_CLEANUP")) == "true",
 	}
 	cfg.External.Enabled = cfg.External.Provider != "none"
+
+	// --- LOG THE FINAL CORE CONFIG ---
+	slog.Debug("Core Configuration Loaded",
+		"monitor_provider", cfg.MonitorProvider,
+		"internal_provider", cfg.Internal.Provider,
+		"external_provider", cfg.External.Provider,
+		"dry_run", cfg.DryRun,
+		"sync_interval", cfg.SyncInterval,
+	)
 
 	return cfg
 }
