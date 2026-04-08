@@ -57,11 +57,14 @@ func (c *Client) SyncState() error {
 
 	for _, m := range monitors {
 		var httpMon monitor.HTTP
-		m.As(&httpMon)
+
+		if err := m.As(&httpMon); err != nil {
+			continue
+		}
 
 		// If it successfully casted an HTTP monitor, the URL will be populated
-		if httpMon.HTTPDetails.URL != "" {
-			cacheKey := httpMon.HTTPDetails.URL + httpMon.Name
+		if httpMon.URL != "" {
+			cacheKey := httpMon.URL + httpMon.Name
 			c.tracked[cacheKey] = true
 		}
 	}
@@ -130,15 +133,15 @@ func (c *Client) buildHTTPMonitor(svc core.Service) *monitor.HTTP {
 	}
 
 	if len(svc.Hosts) > 0 {
-		mon.HTTPDetails.URL = "https://" + svc.Hosts[0]
+		mon.URL = "https://" + svc.Hosts[0]
 	}
 
 	// Apply label overrides
 	if val := labels["mesh.kuma.name"]; val != "" {
-		mon.Base.Name = val
+		mon.Name = val
 	}
 	if val := labels["mesh.kuma.url"]; val != "" {
-		mon.HTTPDetails.URL = val
+		mon.URL = val
 	}
 
 	return mon
