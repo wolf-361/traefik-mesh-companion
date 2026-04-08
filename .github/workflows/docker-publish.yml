@@ -15,7 +15,6 @@ jobs:
   
   update-readme:
     needs: [call-docker-publish]
-    # Only run this on main or tags to avoid PR noise
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
@@ -38,34 +37,38 @@ jobs:
       - name: Calculate Metrics
         id: metrics
         run: |
-          # Get Go Version from go.mod
+          # Get Go Version
           GO_VER=$(grep "^go " go.mod | awk '{print $2}')
           echo "go_version=$GO_VER" >> $GITHUB_OUTPUT
 
-          # Always use the actual version number for the badge
+          # Determine Version/Tag logic
           if [[ $GITHUB_REF == refs/tags/* ]]; then
-            # If pushing a new tag, use that exact tag (e.g., v1.0.2)
             REL_VER=${GITHUB_REF#refs/tags/}
             PULL_TAG=$REL_VER
           else
-            # If pushing to main, ask git for the most recent tag (e.g., v1.0.1)
-            REL_VER=$(git describe --tags --abbrev=0)
-            # But pull the 'latest' image so the Size badge reflects the current commit
+            # Fallback to v0.0.0 if no tags exist yet
+            REL_VER=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
             PULL_TAG="latest"
           fi
-          
           echo "release_version=$REL_VER" >> $GITHUB_OUTPUT
 
-          # Get Docker Image Size
-          IMAGE_NAME="ghcr.io/${{ github.repository }}:$PULL_TAG"
-          docker pull $IMAGE_NAME
+          # Handle GHCR Casing (FORCE LOWERCASE)
+          # This fixes the 'manifest unknown' error for repos with Uppercase names
+          RAW_IMAGE="ghcr.io/${{ github.repository }}:$PULL_TAG"
+          IMAGE_NAME=$(echo "$RAW_IMAGE" | tr '[:upper:]' '[:lower:]')
+          
+          # Pull with Retry (Wait for registry propagation)
+          echo "Fetching metrics for $IMAGE_NAME..."
+          for i in {1..5}; do
+            docker pull $IMAGE_NAME && break || (echo "Retrying in 5s..." && sleep 5)
+          done
+
           SIZE=$(docker images $IMAGE_NAME --format "{{.Size}}")
           echo "docker_size=$SIZE" >> $GITHUB_OUTPUT
 
       - name: Update README Badges
         run: |
-          # Use sed to find the Shields.io patterns and swap them
-          # We use | as a delimiter in sed because the URLs contain /
+          # Update the Shields.io badge values
           sed -i "s/size-.*-blue/size-${{ steps.metrics.outputs.docker_size }}-blue/" README.md
           sed -i "s/Go-.*-00ADD8/Go-${{ steps.metrics.outputs.go_version }}-00ADD8/" README.md
           sed -i "s/version-.*-orange/version-${{ steps.metrics.outputs.release_version }}-orange/" README.md
@@ -76,16 +79,15 @@ jobs:
           git config --global user.email "Wolf-Infrastructure-Bot[bot]@users.noreply.github.com"
           
           if git diff --quiet README.md; then
-            echo "No changes."
+            echo "No changes to README."
           else
             git add README.md
             git commit -m "docs: automate badge updates [skip ci]"
-            
             git remote set-url origin https://x-access-token:${{ steps.generate-token.outputs.token }}@github.com/${{ github.repository }}.git
             git push origin main
           fi
+
   create-release:
-    # Only run this job if the push was a tag starting with 'v'
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [call-docker-publish]
     runs-on: ubuntu-latest
