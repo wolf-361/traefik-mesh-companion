@@ -120,14 +120,22 @@ services:
 
 ### Monitoring Providers
 
-#### Uptime Kuma
-| Variable | Description |
-| :--- | :--- |
-| `MONITOR_PROVIDER` | Set to `kuma` to enable. |
-| `KUMA_URL` | The base URL of your Uptime Kuma instance. |
-| `KUMA_USERNAME` | Admin username for Socket.io authentication. |
-| `KUMA_PASSWORD` | Admin password. |
-| `KUMA_AUTO_ENABLE` | If `true`, monitors all discovered routers by default. |
+#### Uptime Kuma Configuration
+
+These environment variables define the **Global Defaults** enforced across the mesh when service-specific labels are missing.
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `MONITOR_PROVIDER` | - | Set to `kuma` to enable the provider. |
+| `KUMA_URL` | - | The base URL of your Uptime Kuma instance. |
+| `KUMA_USERNAME` | - | Admin username for Socket.io authentication. |
+| `KUMA_PASSWORD` | - | Admin password for Socket.io authentication. |
+| `KUMA_AUTO_ENABLE` | `false` | If `true`, all discovered services are monitored by default. |
+| `KUMA_DEFAULT_INTERVAL` | `60` | Global check interval in seconds. |
+| `KUMA_DEFAULT_MAX_RETRIES` | `3` | Global retries before a service is marked down. |
+| `KUMA_DEFAULT_RETRY_INTERVAL` | `60` | Global interval between retries in seconds. |
+| `KUMA_DEFAULT_MAX_REDIRECTS` | `0` | Global default for maximum allowed redirects. |
+| `KUMA_DEFAULT_ACCEPTED_STATUS_CODES` | `200-299` | Global default for accepted HTTP status codes. |
 
 #### Gatus (via Gatus API Bridge)
 | Variable | Description |
@@ -143,23 +151,30 @@ services:
 
 You can fine-tune how the companion interacts with specific containers by adding these labels to your Docker services.
 
-### 📊 Uptime Kuma Labels
-| Label | Default | Description |
+### 📊 Uptime Kuma Labels (Overrides)
+
+Apply these labels to your services to override the global defaults or enforce specific monitoring requirements.
+
+| Label | Example | Description |
 | :--- | :--- | :--- |
-| `mesh.kuma.enable` | `true/false` | Explicitly enable or disable Kuma monitoring. |
-| `mesh.kuma.name` | Container Name | Display name in the Kuma dashboard. |
-| `mesh.kuma.url` | `https://[Host]` | The endpoint URL to monitor. |
-| `mesh.kuma.group` | - | Assign to a group (created automatically if missing). |
-| `mesh.kuma.description` | - | Add a description to the monitor. |
-| `mesh.kuma.interval` | `60` | Check interval in seconds. |
-| `mesh.kuma.max_retries` | `3` | Number of retries before marking as down. |
-| `mesh.kuma.method` | `GET` | HTTP Method (`GET`, `POST`, `PUT`, etc.). |
-| `mesh.kuma.headers` | - | JSON string of headers (e.g., `{"X-Auth": "key"}`). |
-| `mesh.kuma.body` | - | Request body for POST/PUT methods. |
-| `mesh.kuma.max_redirects` | `0` | Number of HTTP redirects to follow. |
-| `mesh.kuma.accepted_status_codes` | `200-299` | Comma-separated list (e.g., `200,301,302`). |
-| `mesh.kuma.ignore_tls` | `false` | Set to `true` to skip SSL certificate validation. |
-| `mesh.kuma.upside_down` | `false` | Flip logic (Alert if the service is UP). |
+| `mesh.kuma.enable` | `true` | Explicitly enable or disable monitoring for this service. |
+| `mesh.kuma.name` | `auth-api` | Override the monitor name (defaults to container name). |
+| `mesh.kuma.url` | `https://api.wolf-361.ca` | Override the probe URL. |
+| `mesh.kuma.description` | `Core API` | Add a description to the Uptime Kuma monitor. |
+| `mesh.kuma.method` | `POST` | HTTP method to use for the probe. |
+| `mesh.kuma.body` | `{"test":true}` | Request body to send with the probe. |
+| `mesh.kuma.headers` | `{"X-Key":"val"}` | JSON string of custom headers to include. |
+| `mesh.kuma.basic_auth_user` | `user` | Username for Basic Authentication. |
+| `mesh.kuma.basic_auth_pass` | `pass` | Password for Basic Authentication. |
+| `mesh.kuma.ignore_tls` | `true` | Ignore TLS/SSL certificate validation errors. |
+| `mesh.kuma.upside_down` | `true` | Mark as "Up" only if the request fails. |
+| `mesh.kuma.interval` | `30` | Per-service check interval in seconds. |
+| `mesh.kuma.retry_interval` | `30` | Per-service retry interval in seconds. |
+| `mesh.kuma.max_retries` | `5` | Per-service maximum retry count. |
+| `mesh.kuma.resend_interval` | `3600` | Notification resend interval. |
+| `mesh.kuma.timeout` | `10` | Request timeout in seconds. |
+| `mesh.kuma.max_redirects` | `1` | Enforce specific redirect limit for this service. |
+| `mesh.kuma.accepted_status_codes` | `200, 302` | Enforce specific status codes (comma-separated). |
 
 ### 🐊 Gatus Labels
 | Label | Default | Description |
