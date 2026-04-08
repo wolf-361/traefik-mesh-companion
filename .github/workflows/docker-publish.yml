@@ -31,7 +31,8 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
-          # Fetch all history so we can push back to main
+          token: ${{ steps.generate-token.outputs.token }}
+          persist-credentials: false 
           fetch-depth: 0
 
       - name: Calculate Metrics
@@ -75,5 +76,7 @@ jobs:
           else
             git add README.md
             git commit -m "docs: automate badge updates [skip ci]"
+            
+            git remote set-url origin https://x-access-token:${{ steps.generate-token.outputs.token }}@github.com/${{ github.repository }}.git
             git push origin main
           fi
