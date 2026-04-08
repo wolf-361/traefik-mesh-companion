@@ -9,9 +9,10 @@ import (
 // Load reads the core environment variables.
 func Load() *Config {
 	cfg := &Config{
-		LogLevel:     getEnvOrDefault("LOG_LEVEL", "info"),
-		DryRun:       strings.ToLower(os.Getenv("DRY_RUN")) == "true",
-		SyncInterval: parseDuration(os.Getenv("SYNC_INTERVAL"), 1*time.Minute),
+		LogLevel:        getEnvOrDefault("LOG_LEVEL", "info"),
+		DryRun:          strings.ToLower(os.Getenv("DRY_RUN")) == "true",
+		SyncInterval:    parseDuration(os.Getenv("SYNC_INTERVAL"), 1*time.Minute),
+		MonitorProvider: strings.ToLower(getEnvOrDefault("MONITOR_PROVIDER", "none")),
 	}
 
 	cfg.Internal = Pipeline{

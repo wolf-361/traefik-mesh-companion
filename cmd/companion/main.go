@@ -15,7 +15,9 @@ import (
 	"github.com/wolf-361/traefik-mesh-companion/internal/core"
 	"github.com/wolf-361/traefik-mesh-companion/internal/dns/cloudflare"
 	"github.com/wolf-361/traefik-mesh-companion/internal/dns/netbird"
+	"github.com/wolf-361/traefik-mesh-companion/internal/monitor"
 	"github.com/wolf-361/traefik-mesh-companion/internal/monitor/gatus"
+	"github.com/wolf-361/traefik-mesh-companion/internal/monitor/kuma"
 	"github.com/wolf-361/traefik-mesh-companion/internal/server"
 	"github.com/wolf-361/traefik-mesh-companion/internal/watcher"
 )
@@ -106,12 +108,31 @@ func main() {
 	}
 
 	// Assemble Monitoring
-	slog.Debug("Checking for Gatus Bridge configuration...")
-	if gc := gatus.New(exec); gc != nil {
-		if err := gc.SyncState(); err != nil {
-			slog.Warn("Gatus initial sync failed, continuing anyway", "error", err)
+	slog.Debug("Checking for Monitoring configuration...")
+
+	// Use our new shared interface
+	var monitorClient monitor.Provider
+
+	switch cfg.MonitorProvider {
+	case "gatus":
+		slog.Debug("Booting Gatus Provider...")
+		monitorClient = gatus.New(exec)
+	case "kuma":
+		slog.Debug("Booting Uptime Kuma Provider...")
+		monitorClient = kuma.New(exec)
+	case "none":
+		slog.Debug("No monitoring provider requested.")
+	default:
+		slog.Warn("Unknown monitoring provider requested", "provider", cfg.MonitorProvider)
+	}
+
+	// If a client was successfully initialized, run the sync and attach it
+	if monitorClient != nil {
+		if err := monitorClient.SyncState(); err != nil {
+			slog.Warn("Initial monitor sync failed, continuing anyway", "error", err, "provider", cfg.MonitorProvider)
 		}
-		processors = append(processors, gc)
+		// Because monitor.Provider embeds core.Processor, we can safely append it!
+		processors = append(processors, monitorClient)
 	}
 
 	// Sanity Check
