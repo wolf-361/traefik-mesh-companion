@@ -2,9 +2,12 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"sync/atomic" // <-- Added this
 	"time"
 )
 
@@ -14,17 +17,39 @@ const (
 	URL  = "http://127.0.0.1" + Port + Path
 )
 
-// Server wraps the standard HTTP server for health checks
 type Server struct {
 	httpServer *http.Server
+	logger     *slog.Logger
+	version    string
+	isHealthy  *atomic.Bool
 }
 
-// NewServer initializes the health check HTTP server
-func NewServer() *Server {
+func NewServer(logger *slog.Logger, version string, isHealthy *atomic.Bool) *Server {
 	mux := http.NewServeMux()
+
 	mux.HandleFunc(Path, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("OK"))
+		w.Header().Set("Content-Type", "application/json")
+
+		// Check the atomic flag
+		healthy := isHealthy.Load()
+
+		statusStr := "healthy"
+		statusCode := http.StatusOK
+
+		if !healthy {
+			statusStr = "unhealthy"
+			statusCode = http.StatusServiceUnavailable // 503 Error
+		}
+
+		w.WriteHeader(statusCode)
+
+		if err := json.NewEncoder(w).Encode(map[string]string{
+			"status":  statusStr,
+			"service": "traefik-mesh-companion",
+			"version": version,
+		}); err != nil {
+			logger.Error("Failed to encode health response", slog.Any("error", err))
+		}
 	})
 
 	return &Server{
@@ -32,11 +57,15 @@ func NewServer() *Server {
 			Addr:    Port,
 			Handler: mux,
 		},
+		logger:    logger,
+		version:   version,
+		isHealthy: isHealthy,
 	}
 }
 
 // Start boots the server. It blocks until stopped.
 func (s *Server) Start() error {
+	s.logger.Debug("Starting background health server", "port", Port, "version", s.version)
 	if err := s.httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
@@ -45,6 +74,7 @@ func (s *Server) Start() error {
 
 // Stop gracefully shuts down the health server
 func (s *Server) Stop(ctx context.Context) error {
+	s.logger.Debug("Shutting down background health server")
 	return s.httpServer.Shutdown(ctx)
 }
 
