@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 
 	kumaClient "github.com/breml/go-uptime-kuma-client"
 	"github.com/breml/go-uptime-kuma-client/monitor"
@@ -18,6 +19,7 @@ type Client struct {
 	cfg     *Config
 	exec    *core.Executor
 	client  *kumaClient.Client
+	mu      sync.Mutex // Protects the client during reconnection
 	tracked map[string]bool
 }
 
@@ -28,38 +30,65 @@ func New(exec *core.Executor) *Client {
 		return nil
 	}
 
-	// We MUST use context.Background() here.
-	// The socket.io client uses this context to keep the WebSocket alive permanently.
-	client, err := kumaClient.New(context.Background(), cfg.URL, cfg.Username, cfg.Password)
-	if err != nil {
-		slog.Error("Failed to connect to Uptime Kuma Socket.io", "error", err)
+	c := &Client{
+		cfg:     cfg,
+		exec:    exec,
+		tracked: make(map[string]bool),
+	}
+
+	// Try initial connection, but don't kill the app if it fails (lazy load)
+	if err := c.ensureConnected(); err != nil {
+		slog.Warn("Initial Uptime Kuma connection failed, will retry on next sync", "error", err)
+	}
+
+	return c
+}
+
+// ensureConnected checks if we have an active client or creates a new one
+func (c *Client) ensureConnected() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.client != nil {
 		return nil
 	}
 
-	return &Client{
-		cfg:     cfg,
-		exec:    exec,
-		client:  client,
-		tracked: make(map[string]bool),
+	slog.Debug("Connecting to Uptime Kuma Socket.io...", "url", c.cfg.URL)
+
+	// Use Background context so the WebSocket lifecycle matches the app
+	client, err := kumaClient.New(context.Background(), c.cfg.URL, c.cfg.Username, c.cfg.Password)
+	if err != nil {
+		return err
 	}
+
+	c.client = client
+	return nil
+}
+
+// resetClient is called when we detect the connection is dead
+func (c *Client) resetClient() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.client = nil
 }
 
 func (c *Client) Name() string { return "Uptime Kuma" }
 
 func (c *Client) SyncState() error {
-	if c.client == nil {
-		return nil
+	if err := c.ensureConnected(); err != nil {
+		return fmt.Errorf("sync failed: could not connect: %w", err)
 	}
+
 	slog.Info("Syncing existing state from Uptime Kuma...")
 
 	monitors, err := c.client.GetMonitors(context.Background())
 	if err != nil {
+		c.resetClient() // Connection likely died
 		return fmt.Errorf("failed to fetch monitors: %w", err)
 	}
 
 	for _, m := range monitors {
 		var httpMon monitor.HTTP
-
 		if err := m.As(&httpMon); err != nil {
 			continue
 		}
@@ -75,7 +104,9 @@ func (c *Client) SyncState() error {
 }
 
 func (c *Client) Process(services []core.Service) error {
-	if c.client == nil {
+	// We call ensureConnected at the start of every process cycle
+	if err := c.ensureConnected(); err != nil {
+		slog.Error("Uptime Kuma disconnected, skipping process cycle", "error", err)
 		return nil
 	}
 
@@ -101,8 +132,18 @@ func (c *Client) Process(services []core.Service) error {
 		}
 
 		err := c.exec.Run("create Uptime Kuma monitor", func() error {
+			if err := c.ensureConnected(); err != nil {
+				return err
+			}
 			_, err := c.client.CreateMonitor(context.Background(), httpMonitor)
-			return err
+			if err != nil {
+				// If the error looks like a network drop, flag for reset
+				if strings.Contains(err.Error(), "closed network connection") {
+					c.resetClient()
+				}
+				return err
+			}
+			return nil
 		}, "name", httpMonitor.Name, "url", httpMonitor.URL)
 
 		if err == nil {
@@ -151,7 +192,6 @@ func (c *Client) buildHTTPMonitor(svc core.Service) *monitor.HTTP {
 		mon.Body = val
 	}
 	if val := labels["mesh.kuma.headers"]; val != "" {
-		// Kuma expects headers as a JSON string e.g., `{"Authorization": "Bearer token"}`
 		mon.Headers = val
 	}
 	if val := labels["mesh.kuma.basic_auth_user"]; val != "" {
@@ -165,7 +205,7 @@ func (c *Client) buildHTTPMonitor(svc core.Service) *monitor.HTTP {
 		mon.IgnoreTLS = strings.ToLower(val) == "true"
 	}
 	if val := labels["mesh.kuma.upside_down"]; val != "" {
-		mon.UpsideDown = strings.ToLower(val) == "true" // True means "I want this to be DOWN"
+		mon.UpsideDown = strings.ToLower(val) == "true"
 	}
 
 	if val := labels["mesh.kuma.interval"]; val != "" {
@@ -200,7 +240,6 @@ func (c *Client) buildHTTPMonitor(svc core.Service) *monitor.HTTP {
 	}
 
 	if val := labels["mesh.kuma.accepted_status_codes"]; val != "" {
-		// Allows users to pass "200-299, 401, 403" and cleanly parses it
 		rawCodes := strings.Split(val, ",")
 		cleanCodes := make([]string, 0, len(rawCodes))
 		for _, code := range rawCodes {
