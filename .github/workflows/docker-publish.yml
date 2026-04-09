@@ -41,35 +41,20 @@ jobs:
           GO_VER=$(grep "^go " go.mod | awk '{print $2}')
           echo "go_version=$GO_VER" >> $GITHUB_OUTPUT
 
-          # Determine Version/Tag logic
+          # Determine Version logic (no more PULL_TAG needed!)
           if [[ $GITHUB_REF == refs/tags/* ]]; then
             REL_VER=${GITHUB_REF#refs/tags/}
-            PULL_TAG=$REL_VER
           else
             # Fallback to v0.0.0 if no tags exist yet
             REL_VER=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
-            PULL_TAG="latest"
           fi
           echo "release_version=$REL_VER" >> $GITHUB_OUTPUT
-
-          # Handle GHCR Casing (FORCE LOWERCASE)
-          # This fixes the 'manifest unknown' error for repos with Uppercase names
-          RAW_IMAGE="ghcr.io/${{ github.repository }}:$PULL_TAG"
-          IMAGE_NAME=$(echo "$RAW_IMAGE" | tr '[:upper:]' '[:lower:]')
-          
-          # Pull with Retry (Wait for registry propagation)
-          echo "Fetching metrics for $IMAGE_NAME..."
-          for i in {1..5}; do
-            docker pull $IMAGE_NAME && break || (echo "Retrying in 5s..." && sleep 5)
-          done
-
-          SIZE=$(docker images $IMAGE_NAME --format "{{.Size}}")
-          echo "docker_size=$SIZE" >> $GITHUB_OUTPUT
 
       - name: Update README Badges
         run: |
           # Update the Shields.io badge values
-          sed -i "s/size-.*-blue/size-${{ steps.metrics.outputs.docker_size }}-blue/" README.md
+          # Pulling the image_size directly from the reusable workflow's outputs!
+          sed -i "s/size-.*-blue/size-${{ needs.call-docker-publish.outputs.image_size }}-blue/" README.md
           sed -i "s/Go-.*-00ADD8/Go-${{ steps.metrics.outputs.go_version }}-00ADD8/" README.md
           sed -i "s/version-.*-orange/version-${{ steps.metrics.outputs.release_version }}-orange/" README.md
 
