@@ -82,8 +82,21 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v6
 
+      # Strip the 'refs/tags/' prefix to just get the tag name (e.g., 'v1.1.0')
+      - name: Get Tag Name
+        id: get_tag
+        run: echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           make_latest: true
+          # Append a custom message above the auto-generated changelog to link the Docker package
+          body: |
+            **Docker Image Available**
+            This release is published to the GitHub Container Registry. Pull it directly:
+            
+            ```bash
+            docker pull ghcr.io/${{ github.repository }}:${{ steps.get_tag.outputs.TAG_NAME }}
+            ```
