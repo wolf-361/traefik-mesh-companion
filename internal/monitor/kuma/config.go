@@ -14,6 +14,9 @@ type Config struct {
 	Password   string
 	AutoEnable bool
 
+	// Status Page Configuration
+	GlobalStatusPageSlug string
+
 	// Global Defaults
 	DefaultInterval            int64
 	DefaultMaxRetries          int64
@@ -44,6 +47,8 @@ func LoadConfig() *Config {
 		Password:   password,
 		AutoEnable: os.Getenv("KUMA_AUTO_ENABLE") == "true",
 
+		GlobalStatusPageSlug: getEnvString("KUMA_GLOBAL_STATUS_PAGE", "none"),
+
 		DefaultInterval:      getEnvInt64("KUMA_DEFAULT_INTERVAL", 60),
 		DefaultMaxRetries:    getEnvInt64("KUMA_DEFAULT_MAX_RETRIES", 3),
 		DefaultRetryInterval: getEnvInt64("KUMA_DEFAULT_RETRY_INTERVAL", 60),
@@ -51,6 +56,13 @@ func LoadConfig() *Config {
 		DefaultAcceptedStatusCodes: getEnvStringSlice("KUMA_DEFAULT_ACCEPTED_STATUS_CODES",
 			[]string{"200-299"}),
 	}
+}
+
+func getEnvString(key string, fallback string) string {
+	if val := os.Getenv(key); val != "" {
+		return val
+	}
+	return fallback
 }
 
 func getEnvInt64(key string, fallback int64) int64 {

@@ -19,6 +19,7 @@ The companion operates using a multi-pipeline capability architecture, allowing 
 
 ## Features
 * **Zero-Config Auto-Discovery:** Automatically detects and maps your Cloudflare zones, NetBird zones, and Uptime Kuma groups. 
+* **Dynamic Status Pages:** Automatically provisions Uptime Kuma Status Pages and Groups on the fly, routing monitors to specific public dashboards using simple Docker labels.
 * **Label-Based Filtering:** Utilizes standard Traefik labels. No custom labels are required on your application containers for basic functionality.
 * **Safe Orphan Cleanup:** Automatically removes stale DNS records when containers are destroyed, protected by a strict Target Lock to prevent accidental deletion of manually managed records.
 * **Granular Overrides:** Explicitly ignore specific containers or customize ping intervals, monitor groups, and expected status codes using `mesh.*` labels.
@@ -131,6 +132,7 @@ These environment variables define the **Global Defaults** enforced across the m
 | `KUMA_USERNAME` | - | Admin username for Socket.io authentication. |
 | `KUMA_PASSWORD` | - | Admin password for Socket.io authentication. |
 | `KUMA_AUTO_ENABLE` | `false` | If `true`, all discovered services are monitored by default. |
+| `KUMA_GLOBAL_STATUS_PAGE` | `none` | Default status page slug for all new monitors (auto-created if missing). Set to `none` to disable. |
 | `KUMA_DEFAULT_INTERVAL` | `60` | Global check interval in seconds. |
 | `KUMA_DEFAULT_MAX_RETRIES` | `3` | Global retries before a service is marked down. |
 | `KUMA_DEFAULT_RETRY_INTERVAL` | `60` | Global interval between retries in seconds. |
@@ -158,6 +160,9 @@ Apply these labels to your services to override the global defaults or enforce s
 | Label | Example | Description |
 | :--- | :--- | :--- |
 | `mesh.kuma.enable` | `true` | Explicitly enable or disable monitoring for this service. |
+| `mesh.kuma.pages` | `public, dad-it` | Comma-separated list of Status Page slugs to attach this monitor to (auto-creates if missing). |
+| `mesh.kuma.group` | `Databases` | The target category/group on the Status Page (defaults to "Services"). |
+| `mesh.kuma.hide_status` | `true` | Monitors the service internally but completely hides it from all Status Pages. |
 | `mesh.kuma.name` | `auth-api` | Override the monitor name (defaults to container name). |
 | `mesh.kuma.url` | `https://api.wolf-361.ca` | Override the probe URL. |
 | `mesh.kuma.description` | `Core API` | Add a description to the Uptime Kuma monitor. |
