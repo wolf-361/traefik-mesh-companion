@@ -21,7 +21,7 @@ type Client struct {
 	client          *kumaClient.Client
 	statusManager   *StatusPageManager
 	mu              sync.Mutex // Protects the client during reconnection
-	tracked         map[string]bool
+	tracked       map[string]int64
 }
 
 func New(exec *core.Executor) *Client {
@@ -34,7 +34,7 @@ func New(exec *core.Executor) *Client {
 	c := &Client{
 		cfg:             cfg,
 		exec:            exec,
-		tracked:         make(map[string]bool),
+		tracked: make(map[string]int64),
 	}
 
 	// Try initial connection, but don't kill the app if it fails (lazy load)
@@ -92,7 +92,7 @@ func (c *Client) SyncState() error {
 	for _, m := range monitors {
 		var httpMon monitor.HTTP
 		if err := m.As(&httpMon); err == nil && httpMon.URL != "" {
-			c.tracked[httpMon.URL+httpMon.Name] = true
+			c.tracked[httpMon.URL+httpMon.Name] = m.ID
 		}
 	}
 
@@ -112,46 +112,40 @@ func (c *Client) Process(services []core.Service) error {
 	}
 
 	for _, svc := range services {
-		if !c.isEnabled(svc) {
-			continue
-		}
+        if !c.isEnabled(svc) {
+            continue
+        }
 
-		httpMonitor := c.buildHTTPMonitor(svc)
-
+        httpMonitor := c.buildHTTPMonitor(svc)
 		if httpMonitor.URL == "" || httpMonitor.URL == "https://" {
 			continue
 		}
 
-		cacheKey := httpMonitor.URL + httpMonitor.Name
-		if c.tracked[cacheKey] {
-			continue
-		}
+        cacheKey := httpMonitor.URL + httpMonitor.Name
+		monitorID, exists := c.tracked[cacheKey]
 
-		err := c.exec.Run("create Uptime Kuma monitor", func() error {
-			if err := c.ensureConnected(); err != nil {
-				return err
-			}
+        // If it doesn't exist, create it
+        if !exists {
+            err := c.exec.Run("create Uptime Kuma monitor", func() error {
+                createdMon, err := c.client.CreateMonitor(context.Background(), httpMonitor)
+                if err != nil {
+                    return err
+                }
+                monitorID = createdMon
+				c.tracked[cacheKey] = monitorID
+                return nil
+            }, "name", httpMonitor.Name)
+            if err != nil {
+                continue
+            }
+        }
 
-			createdMon, err := c.client.CreateMonitor(context.Background(), httpMonitor)
-			if err != nil {
-				// If the error looks like a network drop, flag for reset
-				if strings.Contains(err.Error(), "closed network connection") {
-					c.resetClient()
-				}
-				return err
-			}
-
-			c.statusManager.ProcessStatusPages(context.Background(), createdMon, httpMonitor.Name, svc.Hosts, svc.Labels)
-
-			return nil
-		}, "name", httpMonitor.Name, "url", httpMonitor.URL)
-
-		if err == nil {
-			c.tracked[cacheKey] = true
-		}
-	}
-
-	return nil
+        // If it's already there, the manager will just skip it.
+        if monitorID != 0 {
+            c.statusManager.ProcessStatusPages(context.Background(), monitorID, httpMonitor.Name, svc.Hosts, svc.Labels)
+        }
+    }
+    return nil
 }
 
 func (c *Client) buildHTTPMonitor(svc core.Service) *monitor.HTTP {
