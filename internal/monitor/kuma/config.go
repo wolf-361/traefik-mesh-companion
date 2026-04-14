@@ -16,6 +16,7 @@ type Config struct {
 
 	// Status Page Configuration
 	GlobalStatusPageSlug string
+	GlobalStatusPageDomain string
 
 	// Global Defaults
 	DefaultInterval            int64
@@ -48,6 +49,7 @@ func LoadConfig() *Config {
 		AutoEnable: os.Getenv("KUMA_AUTO_ENABLE") == "true",
 
 		GlobalStatusPageSlug: getEnvString("KUMA_GLOBAL_STATUS_PAGE", "none"),
+		GlobalStatusPageDomain: getEnvString("KUMA_GLOBAL_STATUS_PAGE_DOMAIN", ""),
 
 		DefaultInterval:      getEnvInt64("KUMA_DEFAULT_INTERVAL", 60),
 		DefaultMaxRetries:    getEnvInt64("KUMA_DEFAULT_MAX_RETRIES", 3),
