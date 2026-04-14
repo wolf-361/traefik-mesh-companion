@@ -91,7 +91,11 @@ func (c *Coordinator) RequestAttach(payload AttachPayload) {
 		slog.Error("Client failed to reach Coordinator Server", "url", url, "error", err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Warn("Failed to close response body", "error", closeErr)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusAccepted {
 		slog.Warn("Coordinator Server rejected request", "status", resp.StatusCode)
