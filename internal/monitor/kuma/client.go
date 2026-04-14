@@ -20,8 +20,9 @@ type Client struct {
 	exec            *core.Executor
 	client          *kumaClient.Client
 	statusManager   *StatusPageManager
+	coordinator   	*Coordinator
 	mu              sync.Mutex // Protects the client during reconnection
-	tracked       map[string]int64
+	tracked       	map[string]int64
 }
 
 func New(exec *core.Executor) *Client {
@@ -64,6 +65,7 @@ func (c *Client) ensureConnected() error {
 
 	c.client = client
 	c.statusManager = NewStatusPageManager(client, c.cfg)
+	c.coordinator = NewCoordinator(c.cfg, c.statusManager)
 	return nil
 }
 
@@ -73,6 +75,7 @@ func (c *Client) resetClient() {
 	defer c.mu.Unlock()
 	c.client = nil
 	c.statusManager = nil
+	c.coordinator = nil
 }
 
 func (c *Client) Name() string { return "Uptime Kuma" }
@@ -142,7 +145,12 @@ func (c *Client) Process(services []core.Service) error {
 
         // If it's already there, the manager will just skip it.
         if monitorID != 0 {
-            c.statusManager.ProcessStatusPages(context.Background(), monitorID, httpMonitor.Name, svc.Hosts, svc.Labels)
+            c.coordinator.RequestAttach(AttachPayload{
+				MonitorID:   monitorID,
+				MonitorName: httpMonitor.Name,
+				Hosts:       svc.Hosts,
+				Labels:      svc.Labels,
+			})
         }
     }
     return nil
