@@ -52,19 +52,17 @@ func (m *StatusPageManager) SyncState(ctx context.Context) error {
 	}
 
 	for _, p := range pages {
-		if len(p.PublicGroupList) == 0 {
-			fullPage, err := m.client.GetStatusPage(ctx, p.Slug)
-			if err == nil && fullPage != nil {
-				m.pageGroupsCache[p.Slug] = fullPage.PublicGroupList
-				p.PublicGroupList = fullPage.PublicGroupList // Update the local variable for mapping logic
-			}
-		} else {
-			m.pageGroupsCache[p.Slug] = p.PublicGroupList
+		fullPage, err := m.client.GetStatusPage(ctx, p.Slug)
+		if err != nil {
+			continue
 		}
 
-		// If this is the global page and we have a domain set in the companion's config, apply it.
+		// Hydrate the cache
+		m.pageGroupsCache[p.Slug] = fullPage.PublicGroupList
+
+		// Enforce domain mapping using the HYDRATED page object
 		if p.Slug == m.cfg.GlobalStatusPageSlug && m.cfg.GlobalStatusPageDomain != "" {
-			m.ensureDomainMapping(ctx, &p, m.cfg.GlobalStatusPageDomain)
+			m.ensureDomainMapping(ctx, fullPage, m.cfg.GlobalStatusPageDomain)
 		}
 	}
 
@@ -86,6 +84,9 @@ func (m *StatusPageManager) ensurePage(ctx context.Context, slug string) (*statu
 }
 
 func (m *StatusPageManager) ensureDomainMapping(ctx context.Context, page *statuspage.StatusPage, host string) {
+	// Safety: Strip protocol if user accidentally included it in env
+	cleanHost := strings.TrimPrefix(strings.TrimPrefix(host, "https://"), "http://")
+
 	// Check if domain is already in the list to avoid duplicate API calls
 	found := false
 	for _, d := range page.DomainNameList {
@@ -96,23 +97,21 @@ func (m *StatusPageManager) ensureDomainMapping(ctx context.Context, page *statu
 	}
 
 	if !found {
-		slog.Info("Enforcing domain mapping for status page", "slug", page.Slug, "domain", host)
-		page.DomainNameList = append(page.DomainNameList, host)
+		slog.Info("Enforcing domain mapping", "slug", page.Slug, "domain", cleanHost)
+		page.DomainNameList = append(page.DomainNameList, cleanHost)
 		
-		if len(page.PublicGroupList) == 0 && m.pageGroupsCache[page.Slug] != nil {
-			page.PublicGroupList = m.pageGroupsCache[page.Slug]
+		// Force group restoration before save to prevent wipe-out
+		if cached, ok := m.pageGroupsCache[page.Slug]; ok {
+			page.PublicGroupList = cached
 		}
 
 		if _, err := m.client.SaveStatusPage(ctx, page); err != nil {
-			slog.Error("Failed to map domain to status page", "error", err)
+			slog.Error("Failed to map domain", "error", err)
 		}
 	}
 }
 
 func (m *StatusPageManager) attachToGroup(ctx context.Context, page *statuspage.StatusPage, monitorID int64, monitorName, groupName string) {
-	// IMPORTANT: Hydrate the page groups from our local cache.
-	// Kuma's GetStatusPage returns an empty PublicGroupList. 
-	// If we don't do this, we delete all existing groups on every save.
 	if cached, ok := m.pageGroupsCache[page.Slug]; ok {
 		page.PublicGroupList = cached
 	}
