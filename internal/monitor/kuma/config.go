@@ -23,6 +23,8 @@ type Config struct {
 	GlobalStatusPageSlug string
 	GlobalStatusPageDomain string
 
+	DefaultTags []string
+
 	// Global Defaults
 	DefaultInterval            int64
 	DefaultMaxRetries          int64
@@ -59,6 +61,8 @@ func LoadConfig() *Config {
 
 		GlobalStatusPageSlug: getEnvString("KUMA_GLOBAL_STATUS_PAGE", "none"),
 		GlobalStatusPageDomain: getEnvString("KUMA_GLOBAL_STATUS_PAGE_DOMAIN", ""),
+
+		DefaultTags: getEnvStringSlice("KUMA_DEFAULT_TAGS", []string{}),
 
 		DefaultInterval:      getEnvInt64("KUMA_DEFAULT_INTERVAL", 60),
 		DefaultMaxRetries:    getEnvInt64("KUMA_DEFAULT_MAX_RETRIES", 3),

@@ -30,9 +30,7 @@ func (m *StatusPageManager) ProcessStatusPages(ctx context.Context, monitorID in
 	}
 
 	pagesToAttach := m.getPagesFromLabels(labels)
-	targetGroupName := m.getGroupName(labels)
-
-	for pageSlug := range pagesToAttach {
+	for pageSlug, targetGroupName := range pagesToAttach {
 		page, err := m.ensurePage(ctx, pageSlug)
 		if err != nil || page == nil {
 			continue
@@ -149,15 +147,38 @@ func (m *StatusPageManager) attachToGroup(ctx context.Context, page *statuspage.
 	}
 }
 
-func (m *StatusPageManager) getPagesFromLabels(labels map[string]string) map[string]bool {
-	pages := make(map[string]bool)
-	if m.cfg.GlobalStatusPageSlug != "" && m.cfg.GlobalStatusPageSlug != "none" {
-		pages[m.cfg.GlobalStatusPageSlug] = true
+func (m *StatusPageManager) getPagesFromLabels(labels map[string]string) map[string]string {
+	pages := make(map[string]string)
+	
+	// Fallback group if none is specified
+	defaultGroup := "Services"
+	if val, ok := labels["mesh.kuma.group"]; ok && val != "" {
+		defaultGroup = strings.TrimSpace(val)
 	}
+
+	//  Add the Global Page (using the default group)
+	if m.cfg.GlobalStatusPageSlug != "" && m.cfg.GlobalStatusPageSlug != "none" {
+		pages[m.cfg.GlobalStatusPageSlug] = defaultGroup
+	}
+
+	// Parse specific pages (Format: "slug:Group Name" or just "slug")
 	if val, ok := labels["mesh.kuma.pages"]; ok {
 		for _, p := range strings.Split(val, ",") {
-			if clean := strings.TrimSpace(p); clean != "" {
-				pages[clean] = true
+			clean := strings.TrimSpace(p)
+			if clean == "" {
+				continue
+			}
+
+			// Check for the colon separator
+			parts := strings.SplitN(clean, ":", 2)
+			slug := strings.TrimSpace(parts[0])
+
+			if len(parts) == 2 {
+				// They specified a group for this specific page!
+				pages[slug] = strings.TrimSpace(parts[1])
+			} else {
+				// No specific group, use the default
+				pages[slug] = defaultGroup
 			}
 		}
 	}
