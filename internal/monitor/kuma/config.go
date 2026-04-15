@@ -14,6 +14,11 @@ type Config struct {
 	Password   string
 	AutoEnable bool
 
+	// Coordinator
+	CoordinatorMode string // "master", "follower", or ""
+	CoordinatorURL  string
+	CoordinatorPort string
+
 	// Status Page Configuration
 	GlobalStatusPageSlug string
 	GlobalStatusPageDomain string
@@ -47,6 +52,10 @@ func LoadConfig() *Config {
 		Username:   username,
 		Password:   password,
 		AutoEnable: os.Getenv("KUMA_AUTO_ENABLE") == "true",
+
+		CoordinatorMode: strings.ToLower(getEnvString("KUMA_COORDINATOR_MODE", "client")),
+		CoordinatorURL:  getEnvString("KUMA_COORDINATOR_URL", ""),
+		CoordinatorPort: getEnvString("KUMA_COORDINATOR_PORT", "8080"),
 
 		GlobalStatusPageSlug: getEnvString("KUMA_GLOBAL_STATUS_PAGE", "none"),
 		GlobalStatusPageDomain: getEnvString("KUMA_GLOBAL_STATUS_PAGE_DOMAIN", ""),
