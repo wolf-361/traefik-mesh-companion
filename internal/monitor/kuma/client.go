@@ -20,6 +20,7 @@ type Client struct {
 	exec            *core.Executor
 	client          *kumaClient.Client
 	statusManager   *StatusPageManager
+	tagManager      *TagManager
 	coordinator   	*Coordinator
 	mu              sync.Mutex // Protects the client during reconnection
 	tracked       	map[string]int64
@@ -66,6 +67,7 @@ func (c *Client) ensureConnected() error {
 	c.client = client
 	c.statusManager = NewStatusPageManager(client, c.cfg)
 	c.coordinator = NewCoordinator(c.cfg, c.statusManager)
+	c.tagManager = NewTagManager(client, c.cfg)
 	return nil
 }
 
@@ -76,6 +78,7 @@ func (c *Client) resetClient() {
 	c.client = nil
 	c.statusManager = nil
 	c.coordinator = nil
+	c.tagManager = nil
 }
 
 func (c *Client) Name() string { return "Uptime Kuma" }
@@ -101,6 +104,10 @@ func (c *Client) SyncState() error {
 
 	if err := c.statusManager.SyncState(context.Background()); err != nil {
 		slog.Warn("Failed to sync status page state, UI groupings might be inconsistent", "error", err)
+	}
+
+	if err := c.tagManager.SyncState(context.Background()); err != nil {
+		slog.Warn("Failed to sync tags", "error", err)
 	}
 
 	slog.Info("Uptime Kuma state synchronized", "monitors", len(c.tracked))
@@ -145,6 +152,8 @@ func (c *Client) Process(services []core.Service) error {
 
         // If it's already there, the manager will just skip it.
         if monitorID != 0 {
+			c.tagManager.ProcessTags(context.Background(), monitorID, svc.Labels)
+			
             c.coordinator.RequestAttach(AttachPayload{
 				MonitorID:   monitorID,
 				MonitorName: httpMonitor.Name,
@@ -188,9 +197,6 @@ func (c *Client) buildHTTPMonitor(svc core.Service) *monitor.HTTP {
 	}
 	if val := labels["mesh.kuma.description"]; val != "" {
 		mon.Description = &val
-	}
-	if tags := c.buildTags(labels); len(tags) > 0 {
-		mon.Tags = tags
 	}
 
 	// Advanced 
@@ -278,85 +284,4 @@ func formatTitleFromSlug(slug string) string {
 		}
 	}
 	return strings.Join(parts, " ")
-}
-
-// getAutoColor assigns a consistent, repeatable color based on the tag's text
-func getAutoColor(tag string) string {
-	// A massive 34-color palette using Tailwind 500s and 600s
-	colors := []string{
-		// Vibrant 500s
-		"#ef4444", "#f97316", "#f59e0b", "#eab308", "#84cc16", "#22c55e",
-		"#10b981", "#14b8a6", "#06b6d4", "#0ea5e9", "#3b82f6", "#6366f1",
-		"#8b5cf6", "#a855f7", "#d946ef", "#ec4899", "#f43f5e",
-		// Deep 600s
-		"#dc2626", "#ea580c", "#d97706", "#ca8a04", "#65a30d", "#16a34a",
-		"#059669", "#0d9488", "#0891b2", "#0284c7", "#2563eb", "#4f46e5",
-		"#7c3aed", "#9333ea", "#c026d3", "#db2777", "#e11d48",
-	}
-
-	// djb2 hash algorithm: spreads strings much more evenly than a simple sum
-	hash := 5381
-	for _, char := range tag {
-		// hash = hash * 33 + char
-		hash = ((hash << 5) + hash) + int(char)
-	}
-
-	// Ensure the hash is positive before running the modulo
-	if hash < 0 {
-		hash = -hash
-	}
-
-	return colors[hash%len(colors)]
-}
-
-// buildTags parses default tags, container labels, and color overrides into a clean slice
-func (c *Client) buildTags(labels map[string]string) []monitor.Tag {
-	var tags []monitor.Tag
-	tagTracker := make(map[string]bool)
-
-	// Helper to parse "tag:color" syntax, apply defaults, and deduplicate
-	processTag := func(rawTag string) {
-		rawTag = strings.TrimSpace(rawTag)
-		if rawTag == "" {
-			return
-		}
-
-		tagName := rawTag
-		tagColor := ""
-
-		// Check for the "name:color" override syntax
-		parts := strings.SplitN(rawTag, ":", 2)
-		if len(parts) == 2 {
-			tagName = strings.TrimSpace(parts[0])
-			tagColor = strings.TrimSpace(parts[1])
-		}
-
-		if !tagTracker[tagName] {
-			tagTracker[tagName] = true
-
-			// If no color was provided, generate one automatically
-			if tagColor == "" {
-				tagColor = getAutoColor(tagName)
-			}
-
-			tags = append(tags, monitor.Tag{
-				Name:  tagName,
-				Color: tagColor,
-			})
-		}
-	}
-
-	//  Process Default Tags (Infrastructure/Server Tags)
-	for _, t := range c.cfg.DefaultTags {
-		processTag(t)
-	}
-
-	// Process Specific Container Labels
-	if val := labels["mesh.kuma.tags"]; val != "" {
-		for _, t := range strings.Split(val, ",") {
-			processTag(t)
-		}
-	}
-
-	return tags
 }
