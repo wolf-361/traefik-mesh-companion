@@ -20,6 +20,7 @@ type Client struct {
 	exec            *core.Executor
 	client          *kumaClient.Client
 	statusManager   *StatusPageManager
+	tagManager      *TagManager
 	coordinator   	*Coordinator
 	mu              sync.Mutex // Protects the client during reconnection
 	tracked       	map[string]int64
@@ -66,6 +67,7 @@ func (c *Client) ensureConnected() error {
 	c.client = client
 	c.statusManager = NewStatusPageManager(client, c.cfg)
 	c.coordinator = NewCoordinator(c.cfg, c.statusManager)
+	c.tagManager = NewTagManager(client, c.cfg)
 	return nil
 }
 
@@ -76,6 +78,7 @@ func (c *Client) resetClient() {
 	c.client = nil
 	c.statusManager = nil
 	c.coordinator = nil
+	c.tagManager = nil
 }
 
 func (c *Client) Name() string { return "Uptime Kuma" }
@@ -101,6 +104,10 @@ func (c *Client) SyncState() error {
 
 	if err := c.statusManager.SyncState(context.Background()); err != nil {
 		slog.Warn("Failed to sync status page state, UI groupings might be inconsistent", "error", err)
+	}
+
+	if err := c.tagManager.SyncState(context.Background()); err != nil {
+		slog.Warn("Failed to sync tags", "error", err)
 	}
 
 	slog.Info("Uptime Kuma state synchronized", "monitors", len(c.tracked))
@@ -145,6 +152,8 @@ func (c *Client) Process(services []core.Service) error {
 
         // If it's already there, the manager will just skip it.
         if monitorID != 0 {
+			c.tagManager.ProcessTags(context.Background(), monitorID, svc.Labels)
+			
             c.coordinator.RequestAttach(AttachPayload{
 				MonitorID:   monitorID,
 				MonitorName: httpMonitor.Name,
@@ -176,10 +185,10 @@ func (c *Client) buildHTTPMonitor(svc core.Service) *monitor.HTTP {
 		},
 	}
 
+	// Basic params
 	if len(svc.Hosts) > 0 {
 		mon.URL = "https://" + svc.Hosts[0]
 	}
-
 	if val := labels["mesh.kuma.name"]; val != "" {
 		mon.Name = val
 	}
@@ -189,6 +198,8 @@ func (c *Client) buildHTTPMonitor(svc core.Service) *monitor.HTTP {
 	if val := labels["mesh.kuma.description"]; val != "" {
 		mon.Description = &val
 	}
+
+	// Advanced 
 	if val := labels["mesh.kuma.method"]; val != "" {
 		mon.Method = strings.ToUpper(val)
 	}
