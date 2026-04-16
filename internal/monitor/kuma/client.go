@@ -22,8 +22,10 @@ type Client struct {
 	statusManager   *StatusPageManager
 	tagManager      *TagManager
 	coordinator   	*Coordinator
-	mu              sync.Mutex // Protects the client during reconnection
 	tracked       	map[string]int64
+	mu              sync.Mutex // Protects the client during reconnection
+	connecting    bool       // Guard to prevent spawning multiple connection attempts
+	synced        bool       // Tracks if we need to perform a lazy state sync
 }
 
 func New(exec *core.Executor) *Client {
@@ -39,15 +41,13 @@ func New(exec *core.Executor) *Client {
 		tracked: make(map[string]int64),
 	}
 
-	// Try initial connection, but don't kill the app if it fails (lazy load)
-	if err := c.ensureConnected(); err != nil {
-		slog.Warn("Initial Uptime Kuma connection failed, will retry on next sync", "error", err)
-	}
+	// Trigger background connection immediately
+	_ = c.ensureConnected()
 
 	return c
 }
 
-// ensureConnected checks if we have an active client or creates a new one
+// ensureConnected checks if we have an active client or creates a new one asynchronously
 func (c *Client) ensureConnected() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -56,19 +56,37 @@ func (c *Client) ensureConnected() error {
 		return nil
 	}
 
-	slog.Debug("Connecting to Uptime Kuma Socket.io...", "url", c.cfg.URL)
-
-	// Use Background context so the WebSocket lifecycle matches the app
-	client, err := kumaClient.New(context.Background(), c.cfg.URL, c.cfg.Username, c.cfg.Password)
-	if err != nil {
-		return err
+	if c.connecting {
+		return fmt.Errorf("connection currently initializing in background")
 	}
 
-	c.client = client
-	c.statusManager = NewStatusPageManager(client, c.cfg)
-	c.coordinator = NewCoordinator(c.cfg, c.statusManager)
-	c.tagManager = NewTagManager(client, c.cfg)
-	return nil
+	c.connecting = true
+
+	slog.Debug("Connecting to Uptime Kuma Socket.io...", "url", c.cfg.URL)
+
+	go func() {
+		// Socket.io handshake can deadlock if the target is a 404 or bad gateway.
+		// Running this in a goroutine protects the main DNS sync loops.
+		client, err := kumaClient.New(context.Background(), c.cfg.URL, c.cfg.Username, c.cfg.Password)
+
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		c.connecting = false
+
+		if err != nil {
+			slog.Warn("Background Uptime Kuma connection failed, will retry next cycle", "error", err)
+			return
+		}
+
+		c.client = client
+		c.statusManager = NewStatusPageManager(client, c.cfg)
+		c.coordinator = NewCoordinator(c.cfg, c.statusManager)
+		c.tagManager = NewTagManager(client, c.cfg)
+		c.synced = false // Force a sync on the next process cycle
+		slog.Info("Successfully connected to Uptime Kuma")
+	}()
+
+	return fmt.Errorf("connection started in background")
 }
 
 // resetClient is called when we detect the connection is dead
@@ -79,15 +97,21 @@ func (c *Client) resetClient() {
 	c.statusManager = nil
 	c.coordinator = nil
 	c.tagManager = nil
+	c.synced = false
 }
 
 func (c *Client) Name() string { return "Uptime Kuma" }
 
 func (c *Client) SyncState() error {
 	if err := c.ensureConnected(); err != nil {
-		return fmt.Errorf("sync failed: could not connect: %w", err)
+		slog.Debug("Uptime Kuma connection not ready during initial sync. Will lazy-sync later.", "status", err)
+		return nil // Don't return an error to prevent blocking the main startup loop
 	}
 
+	return c.doSync()
+}
+
+func (c *Client) doSync() error {
 	slog.Info("Syncing existing state from Uptime Kuma...")
 	monitors, err := c.client.GetMonitors(context.Background())
 	if err != nil {
@@ -110,6 +134,10 @@ func (c *Client) SyncState() error {
 		slog.Warn("Failed to sync tags", "error", err)
 	}
 
+	c.mu.Lock()
+	c.synced = true
+	c.mu.Unlock()
+
 	slog.Info("Uptime Kuma state synchronized", "monitors", len(c.tracked))
 	return nil
 }
@@ -117,8 +145,18 @@ func (c *Client) SyncState() error {
 func (c *Client) Process(services []core.Service) error {
 	// We call ensureConnected at the start of every process cycle
 	if err := c.ensureConnected(); err != nil {
-		slog.Error("Uptime Kuma disconnected, skipping process cycle", "error", err)
 		return nil
+	}
+
+	c.mu.Lock()
+	needsSync := !c.synced
+	c.mu.Unlock()
+
+	if needsSync {
+		if err := c.doSync(); err != nil {
+			slog.Error("Failed to perform lazy sync", "error", err)
+			return nil
+		}
 	}
 
 	for _, svc := range services {
