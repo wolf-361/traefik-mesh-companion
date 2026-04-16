@@ -123,6 +123,14 @@ func (c *Client) doSync() error {
 		var httpMon monitor.HTTP
 		if err := m.As(&httpMon); err == nil && httpMon.URL != "" {
 			c.tracked[httpMon.URL+httpMon.Name] = m.ID
+
+			// Extract the tag IDs already attached to this monitor on the server
+            var existingTags []int64
+            for _, t := range httpMon.Tags {
+                existingTags = append(existingTags, t.TagID)
+            }
+            // Seed the TagManager's cache so it knows they already exist!
+            c.tagManager.SeedMonitorTags(m.ID, existingTags)
 		}
 	}
 

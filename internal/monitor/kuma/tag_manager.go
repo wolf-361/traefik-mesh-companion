@@ -51,6 +51,21 @@ func (m *TagManager) SyncState(ctx context.Context) error {
 	return nil
 }
 
+// SeedMonitorTags pre-populates the cache with tags already attached on the server
+// so we don't duplicate them on restart.
+func (m *TagManager) SeedMonitorTags(monitorID int64, existingTagIDs []int64) {
+    m.mu.Lock()
+    defer m.mu.Unlock()
+
+    if m.attachedCache[monitorID] == nil {
+        m.attachedCache[monitorID] = make(map[int64]bool)
+    }
+
+    for _, tagID := range existingTagIDs {
+        m.attachedCache[monitorID][tagID] = true
+    }
+}
+
 // ensureTag checks if a tag exists, and if not, creates it in Uptime Kuma
 func (m *TagManager) ensureTag(ctx context.Context, name, color string) (int64, error) {
 	m.mu.RLock()
