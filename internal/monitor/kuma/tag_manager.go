@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"sync"
 
 	kumaClient "github.com/breml/go-uptime-kuma-client"
 	"github.com/breml/go-uptime-kuma-client/tag"
@@ -16,16 +17,19 @@ type TagDef struct {
 }
 
 type TagManager struct {
-	client    *kumaClient.Client
-	cfg       *Config
-	tagsCache map[string]int64
+	client        *kumaClient.Client
+	cfg           *Config
+	tagsCache     map[string]int64
+	attachedCache map[int64]map[int64]bool // monitorID -> tagID -> exists
+	mu            sync.RWMutex             // Protects both caches
 }
 
 func NewTagManager(client *kumaClient.Client, cfg *Config) *TagManager {
 	return &TagManager{
 		client:    client,
 		cfg:       cfg,
-		tagsCache: make(map[string]int64),
+		tagsCache:     make(map[string]int64),
+		attachedCache: make(map[int64]map[int64]bool),
 	}
 }
 
@@ -37,6 +41,8 @@ func (m *TagManager) SyncState(ctx context.Context) error {
 		return err
 	}
 
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	for _, t := range tags {
 		m.tagsCache[t.Name] = t.ID
 	}
@@ -47,9 +53,12 @@ func (m *TagManager) SyncState(ctx context.Context) error {
 
 // ensureTag checks if a tag exists, and if not, creates it in Uptime Kuma
 func (m *TagManager) ensureTag(ctx context.Context, name, color string) (int64, error) {
+	m.mu.RLock()
 	if id, exists := m.tagsCache[name]; exists {
+		m.mu.RUnlock()
 		return id, nil
 	}
+	m.mu.RUnlock()
 
 	slog.Info("Creating missing tag", "tag", name)
 	newTag := tag.Tag{
@@ -59,14 +68,16 @@ func (m *TagManager) ensureTag(ctx context.Context, name, color string) (int64, 
 
 	id, err := m.client.CreateTag(ctx, newTag)
 	if err != nil {
-		// If another node created it at the exact same millisecond, catch the uniqueness error safely
 		if strings.Contains(err.Error(), "UNIQUE constraint") {
 			return 0, err
 		}
 		return 0, err
 	}
 
+	m.mu.Lock()
 	m.tagsCache[name] = id
+	m.mu.Unlock()
+
 	return id, nil
 }
 
@@ -74,20 +85,46 @@ func (m *TagManager) ensureTag(ctx context.Context, name, color string) (int64, 
 func (m *TagManager) ProcessTags(ctx context.Context, monitorID int64, labels map[string]string) {
 	desiredTags := m.buildTagDefs(labels)
 
+	// Ensure our map exists for this specific monitor
+	m.mu.Lock()
+	if m.attachedCache[monitorID] == nil {
+		m.attachedCache[monitorID] = make(map[int64]bool)
+	}
+	m.mu.Unlock()
+
 	for _, tDef := range desiredTags {
 		tagID, err := m.ensureTag(ctx, tDef.Name, tDef.Color)
 		if err != nil || tagID == 0 {
 			continue
 		}
 
+		// --- THE DEDUPLICATION CHECK ---
+		m.mu.RLock()
+		alreadyAttached := m.attachedCache[monitorID][tagID]
+		m.mu.RUnlock()
+
+		if alreadyAttached {
+			continue // Skip API call entirely, we already attached it during this session!
+		}
+
 		// Attach tag to monitor
 		_, err = m.client.AddMonitorTag(ctx, tagID, monitorID, "")
+		
 		if err != nil {
-			// Ignore errors if the tag is already attached to this monitor (standard SQLite constraint)
 			errStr := strings.ToLower(err.Error())
-			if !strings.Contains(errStr, "unique constraint") && !strings.Contains(errStr, "already") {
+			// If Uptime Kuma actually catches the duplicate, it will throw an error. We cache it anyway.
+			if strings.Contains(errStr, "unique constraint") || strings.Contains(errStr, "already") {
+				m.mu.Lock()
+				m.attachedCache[monitorID][tagID] = true
+				m.mu.Unlock()
+			} else {
 				slog.Warn("Failed to attach tag to monitor", "tag", tDef.Name, "monitor_id", monitorID, "error", err)
 			}
+		} else {
+			// Success! Cache it so we never send this exact request again
+			m.mu.Lock()
+			m.attachedCache[monitorID][tagID] = true
+			m.mu.Unlock()
 		}
 	}
 }
