@@ -341,16 +341,18 @@ func (c *Client) buildHTTPMonitor(svc core.Service, router Router, resolvedURL s
 
 // getMeshLabel handles the hierarchy: Router Override > Global Service Label
 func (c *Client) getMeshLabel(svc core.Service, routerName string, key string) string {
-	// Highest Priority: Router-specific Kuma key (e.g., traefik.http.routers.my-router.mesh.kuma.enable)
-	routerKumaKey := fmt.Sprintf("traefik.http.routers.%s.mesh.kuma.%s", routerName, key)
-	if val, ok := svc.Labels[routerKumaKey]; ok {
-		return val
-	}
+	if routerName != "default" {
+		// Priority 1: Router-specific Kuma key (e.g., mesh.routers.kuma-status.kuma.enable)
+		routerKumaKey := fmt.Sprintf("mesh.routers.%s.kuma.%s", routerName, key)
+		if val, ok := svc.Labels[routerKumaKey]; ok {
+			return val
+		}
 
-	// Priority 2: Router-specific Generic key (e.g., traefik.http.routers.my-router.mesh.managed)
-	routerMeshKey := fmt.Sprintf("traefik.http.routers.%s.mesh.%s", routerName, key)
-	if val, ok := svc.Labels[routerMeshKey]; ok {
-		return val
+		// Priority 2: Router-specific Generic key (e.g., mesh.routers.kuma-status.managed)
+		routerMeshKey := fmt.Sprintf("mesh.routers.%s.%s", routerName, key)
+		if val, ok := svc.Labels[routerMeshKey]; ok {
+			return val
+		}
 	}
 
 	// Priority 3: Global Kuma key (e.g., mesh.kuma.enable)
