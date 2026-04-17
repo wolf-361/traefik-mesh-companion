@@ -19,13 +19,13 @@ The companion operates using a multi-pipeline capability architecture, allowing 
 4. **Distributed Coordinator:** Operates in a Server/Client topology to prevent API race conditions when managing Uptime Kuma UI states across multiple edge nodes simultaneously.
 
 ## Features
-* **Zero-Config Auto-Discovery:** Automatically detects and maps your Cloudflare zones, NetBird zones, and Uptime Kuma groups.
-* **Dynamic Status Pages:** Automatically provisions Uptime Kuma Status Pages and Groups on the fly. Enforce global domain mappings directly from your environment variables.
-* **Granular Page Grouping:** Route a single monitor to multiple different status pages, and assign it to a different visual group on each page.
+* **Zero-Config Auto-Discovery via AST:** Natively parses complex Traefik routing rules (including nested `Host`, `PathPrefix`, `&&`, and `||` logic) into an Abstract Syntax Tree to automatically build pixel-perfect monitor URLs.
+* **Global URL Deduplication:** Smartly evaluates generated endpoints across all containers. If multiple Traefik routers resolve to the exact same URL, the companion groups them into a single Uptime Kuma monitor to prevent API spam.
+* **Dynamic Status Pages & Domain Binding:** Automatically provisions Uptime Kuma Status Pages and Groups on the fly. You can dynamically bind Traefik router domains directly to Uptime Kuma Status Pages using a single label.
 * **Smart Auto-Color Tagging:** Automatically injects UI tags (like the server hostname) into Uptime Kuma monitors, utilizing a deterministic hash (`djb2`) to assign distinct, repeatable colors across your mesh without manual configuration.
 * **Safe Orphan Cleanup:** Automatically removes stale DNS records when containers are destroyed, protected by a strict Target Lock to prevent accidental deletion of manually managed records.
-* **Granular Overrides:** Explicitly ignore specific containers or customize ping intervals, monitor groups, and expected status codes using `mesh.*` labels.
-* **Highly Optimized Execution:** Safely supports synchronization intervals as low as 60 seconds. The watcher engine employs in-memory state caching and pre-compiled regex filters to eliminate unnecessary API calls.
+* **Traefik-Safe Overrides:** Fine-tune specific routers (custom paths like `/health`, intervals, expected status codes) using a custom `mesh.routers.*` namespace that bypasses Traefik's strict schema validator.
+* **Highly Optimized Execution:** Safely supports synchronization intervals as low as 60 seconds. The watcher engine employs in-memory state caching to eliminate unnecessary API calls.
 * **Ultra-Low Footprint:** Compiled as a statically linked Go binary running in a distroless `scratch` container.
 
 ## Quick Start (Docker Compose)
@@ -126,30 +126,50 @@ These environment variables define the Global Defaults enforced across the mesh 
 
 ## 🏷️ Manual Overrides & Labels
 
-You can fine-tune how the companion interacts with specific containers by adding these labels to your Docker services.
+You can fine-tune how the companion interacts with specific containers by adding labels to your Docker services. 
 
-### 📊 Uptime Kuma Labels (Overrides)
+### The Label Hierarchy
+To prevent breaking Traefik's strict internal schema validation, **do not place mesh overrides inside the `traefik.*` namespace.** The Companion utilizes a fallback hierarchy:
+1. **Router-Specific (Highest Priority):** `mesh.routers.<router_name>.kuma.<property>`
+2. **Global Service Fallback:** `mesh.kuma.<property>`
 
-Apply these labels to your services to override the global defaults or enforce specific routing requirements.
+*Example:*
+```yaml
+      # Traefik Router Definition
+      traefik.http.routers.api.rule: "Host(`api.wolf.ca`)"
+      
+      # Overrides apply strictly to the "api" router
+      mesh.routers.api.kuma.url: "/health"
+      mesh.routers.api.kuma.accepted_status_codes: "200, 401"
+      
+      # Global Service definitions (Applies to all routers on this container)
+      mesh.kuma.tags: "backend, prod"
+```
 
-| Label | Example | Description |
+### 📊 Uptime Kuma Override Properties
+
+Apply these suffixes to the hierarchy above to override global defaults.
+
+| Property | Example | Description |
 | :--- | :--- | :--- |
-| `mesh.kuma.enable` | `true` | Explicitly enable or disable monitoring for this service. |
-| `mesh.kuma.pages` | `public:Websites, lab` | Comma-separated list of Status Page slugs to attach to. Supports optional `slug:Group Name` syntax. |
-| `mesh.kuma.group` | `Databases` | The default target category/group for status pages if not explicitly defined in `pages`. |
-| `mesh.kuma.tags` | `frontend, prod:red` | Apply UI tags. Use `tagName` for auto-colors, or `tagName:colorCode` for strict overrides. |
-| `mesh.kuma.hide_status` | `true` | Monitors the service internally but completely hides it from all Status Pages. |
-| `mesh.kuma.name` | `auth-api` | Override the monitor display name (defaults to container name). |
-| `mesh.kuma.url` | `https://api.wolf.ca` | Override the probe URL instead of parsing it from Traefik. |
-| `mesh.kuma.method` | `POST` | HTTP method to use for the probe. |
-| `mesh.kuma.body` | `{"test":true}` | Request body to send with the probe. |
-| `mesh.kuma.headers` | `{"X-Key":"val"}` | JSON string of custom headers to include. |
-| `mesh.kuma.ignore_tls` | `true` | Ignore TLS/SSL certificate validation errors. |
-| `mesh.kuma.interval` | `30` | Per-service check interval in seconds. |
-| `mesh.kuma.accepted_status_codes` | `200, 302` | Enforce specific status codes (comma-separated). |
+| `enable` | `true` | Explicitly enable or disable monitoring for this router/service. |
+| `pages` | `public:Websites, lab` | Comma-separated list of Status Page slugs to attach to. Supports optional `slug:Group Name` syntax. |
+| `group` | `Databases` | The default target category/group for status pages if not explicitly defined in `pages`. |
+| `tags` | `frontend, prod:red` | Apply UI tags. Use `tagName` for auto-colors, or `tagName:colorCode` for strict overrides. |
+| `hide_status` | `true` | Monitors the service internally but completely hides it from all Status Pages. |
+| `name` | `Auth API` | Override the monitor display name (defaults to container name). |
+| `url` | `/health` or `http://x` | **Relative:** Appends to the AST-discovered URL (e.g. `api.com/health`).<br>**Absolute:** Overrides the URL entirely. |
+| `status_page_binding` | `home-lab` | Extracts the router's Domain and automatically attaches it as a custom domain for the targeted Uptime Kuma Status Page. |
+| `allow_duplicates` | `true` | Bypasses the Global URL Deduplicator, forcing the creation of a distinct monitor even if the URL is already tracked. |
+| `method` | `POST` | HTTP method to use for the probe. |
+| `body` | `{"test":true}` | Request body to send with the probe. |
+| `headers` | `{"X-Key":"val"}` | JSON string of custom headers to include. |
+| `ignore_tls` | `true` | Ignore TLS/SSL certificate validation errors. |
+| `interval` | `30` | Per-service check interval in seconds. |
+| `accepted_status_codes` | `200, 302` | Enforce specific status codes (comma-separated). |
 
-### 🌐 DNS & Global Overrides
-* `traefik.http.routers.<name>.mesh.managed=false`: Completely ignore this router for all pipelines.
+### 🌐 DNS Overrides
+* `mesh.routers.<name>.managed=false`: Completely ignore this router for all pipelines (DNS & Monitoring).
 * `mesh.dns.internal`: `true/false` to force-enable/disable internal Mesh DNS sync.
 * `mesh.dns.external`: `true/false` to force-enable/disable public Cloudflare sync.
 
@@ -179,6 +199,12 @@ The project utilizes a Capability-Driven architectural layout. To add support fo
 type Processor interface {
     Name() string
     Process(services []Service) error
+}
+
+// internal/monitor/types.go
+type Provider interface {
+    core.Processor
+    SyncState() error
 }
 ```
 
