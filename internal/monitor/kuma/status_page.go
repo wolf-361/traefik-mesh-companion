@@ -109,6 +109,16 @@ func (m *StatusPageManager) ensureDomainMapping(ctx context.Context, page *statu
 	}
 }
 
+// BindDomain acts as a public wrapper to safely attach domains to a specific status page
+func (m *StatusPageManager) BindDomain(ctx context.Context, slug string, domain string) error {
+	page, err := m.ensurePage(ctx, slug)
+	if err != nil || page == nil {
+		return err
+	}
+	m.ensureDomainMapping(ctx, page, domain)
+	return nil
+}
+
 func (m *StatusPageManager) attachToGroup(ctx context.Context, page *statuspage.StatusPage, monitorID int64, monitorName, groupName string) {
 	if cached, ok := m.pageGroupsCache[page.Slug]; ok {
 		page.PublicGroupList = cached

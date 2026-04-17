@@ -11,9 +11,15 @@ import (
 	kumaClient "github.com/breml/go-uptime-kuma-client"
 	"github.com/breml/go-uptime-kuma-client/monitor"
 	"github.com/wolf-361/traefik-mesh-companion/internal/core"
+	"github.com/wolf-361/traefik-mesh-companion/internal/traefik"
 )
 
 var _ core.Processor = (*Client)(nil)
+
+type Router struct {
+	Name string
+	Rule string
+}
 
 type Client struct {
 	cfg             *Config
@@ -22,7 +28,10 @@ type Client struct {
 	statusManager   *StatusPageManager
 	tagManager      *TagManager
 	coordinator   	*Coordinator
-	tracked       	map[string]int64
+
+	trackedURLs map[string]int64 
+	tracked     map[string]int64
+
 	mu              sync.Mutex // Protects the client during reconnection
 	connecting    bool       // Guard to prevent spawning multiple connection attempts
 	synced        bool       // Tracks if we need to perform a lazy state sync
@@ -36,14 +45,13 @@ func New(exec *core.Executor) *Client {
 	}
 
 	c := &Client{
-		cfg:             cfg,
-		exec:            exec,
-		tracked: make(map[string]int64),
+		cfg:         cfg,
+		exec:        exec,
+		trackedURLs: make(map[string]int64),
+		tracked:     make(map[string]int64),
 	}
 
-	// Trigger background connection immediately
 	_ = c.ensureConnected()
-
 	return c
 }
 
@@ -105,7 +113,7 @@ func (c *Client) Name() string { return "Uptime Kuma" }
 func (c *Client) SyncState() error {
 	if err := c.ensureConnected(); err != nil {
 		slog.Debug("Uptime Kuma connection not ready during initial sync. Will lazy-sync later.", "status", err)
-		return nil // Don't return an error to prevent blocking the main startup loop
+		return nil
 	}
 
 	return c.doSync()
@@ -122,6 +130,8 @@ func (c *Client) doSync() error {
 	for _, m := range monitors {
 		var httpMon monitor.HTTP
 		if err := m.As(&httpMon); err == nil && httpMon.URL != "" {
+			// Track globally to prevent duplicate creations
+			c.trackedURLs[httpMon.URL] = m.ID
 			c.tracked[httpMon.URL+httpMon.Name] = m.ID
 
 			// Extract the tag IDs already attached to this monitor on the server
@@ -167,57 +177,96 @@ func (c *Client) Process(services []core.Service) error {
 		}
 	}
 
+	cycleURLs := make(map[string]int64)
+
 	for _, svc := range services {
-        if !c.isEnabled(svc) {
-            continue
-        }
+		routers := extractRouters(svc.Labels)
 
-        httpMonitor := c.buildHTTPMonitor(svc)
-		if httpMonitor.URL == "" || httpMonitor.URL == "https://" {
-			continue
+		for _, router := range routers {
+			// Status Page Binding
+			if bindingSlug := c.getMeshLabel(svc, router.Name, "status_page_binding"); bindingSlug != "" {
+				hosts, _ := traefik.ParseRule(router.Rule)
+				if len(hosts) > 0 {
+					domain := hosts[0]
+					if err := c.statusManager.BindDomain(context.Background(), bindingSlug, domain); err != nil {
+						slog.Warn("Failed to bind domain", "slug", bindingSlug, "domain", domain, "error", err)
+					}
+				}
+			}
+
+			// Enabled Check
+			if !c.isEnabled(svc, router.Name) {
+				continue
+			}
+
+			// Resolve the URL and build monitor
+			monitorURL := c.resolveMonitorURL(svc, router)
+			if monitorURL == "" || monitorURL == "https://" {
+				continue
+			}
+			httpMonitor := c.buildHTTPMonitor(svc, router, monitorURL)
+
+			if httpMonitor.URL == "" || httpMonitor.URL == "https://" {
+				continue
+			}
+
+			var monitorID int64
+			var exists bool
+			allowDupes := strings.ToLower(c.getMeshLabel(svc, router.Name, "allow_duplicates")) == "true"
+
+			if allowDupes {
+				// Fallback to legacy URL+Name tracking
+				monitorID, exists = c.tracked[monitorURL+httpMonitor.Name]
+			} else {
+				// Check global state first, then current cycle state
+				monitorID, exists = c.trackedURLs[monitorURL]
+				if !exists {
+					monitorID, exists = cycleURLs[monitorURL]
+				}
+			}
+
+			// If it doesn't exist, create it
+			if !exists {
+				err := c.exec.Run("create Uptime Kuma monitor", func() error {
+					createdMon, err := c.client.CreateMonitor(context.Background(), httpMonitor)
+					if err != nil {
+						return err
+					}
+					monitorID = createdMon
+					
+					// Cache it so subsequent routers in this cycle don't recreate it
+					c.trackedURLs[monitorURL] = monitorID
+					c.tracked[monitorURL+httpMonitor.Name] = monitorID
+					cycleURLs[monitorURL] = monitorID
+					return nil
+				}, "name", httpMonitor.Name)
+				
+				if err != nil {
+					continue
+				}
+			} else {
+				slog.Debug("Monitor already exists for URL, skipping creation", "url", monitorURL)
+			}
+
+			// Attach Tags and Status Pages
+			if monitorID != 0 {
+				c.tagManager.ProcessTags(context.Background(), monitorID, svc.Labels)
+				
+				c.coordinator.RequestAttach(AttachPayload{
+					MonitorID:   monitorID,
+					MonitorName: httpMonitor.Name,
+					Hosts:       svc.Hosts,
+					Labels:      svc.Labels,
+				})
+			}
 		}
-
-        cacheKey := httpMonitor.URL + httpMonitor.Name
-		monitorID, exists := c.tracked[cacheKey]
-
-        // If it doesn't exist, create it
-        if !exists {
-            err := c.exec.Run("create Uptime Kuma monitor", func() error {
-                createdMon, err := c.client.CreateMonitor(context.Background(), httpMonitor)
-                if err != nil {
-                    return err
-                }
-                monitorID = createdMon
-				c.tracked[cacheKey] = monitorID
-                return nil
-            }, "name", httpMonitor.Name)
-            if err != nil {
-                continue
-            }
-        }
-
-        // If it's already there, the manager will just skip it.
-        if monitorID != 0 {
-			c.tagManager.ProcessTags(context.Background(), monitorID, svc.Labels)
-			
-            c.coordinator.RequestAttach(AttachPayload{
-				MonitorID:   monitorID,
-				MonitorName: httpMonitor.Name,
-				Hosts:       svc.Hosts,
-				Labels:      svc.Labels,
-			})
-        }
     }
     return nil
 }
 
-func (c *Client) buildHTTPMonitor(svc core.Service) *monitor.HTTP {
-	labels := svc.Labels
-
-	// Initialize with Global Defaults from Config
+func (c *Client) buildHTTPMonitor(svc core.Service, router Router, resolvedURL string) *monitor.HTTP {
 	mon := &monitor.HTTP{
 		Base: monitor.Base{
-			Name:          svc.ContainerName,
 			Interval:      c.cfg.DefaultInterval,
 			MaxRetries:    c.cfg.DefaultMaxRetries,
 			RetryInterval: c.cfg.DefaultRetryInterval,
@@ -231,76 +280,54 @@ func (c *Client) buildHTTPMonitor(svc core.Service) *monitor.HTTP {
 		},
 	}
 
-	// Basic params
-	if len(svc.Hosts) > 0 {
-		mon.URL = "https://" + svc.Hosts[0]
-	}
-	if val := labels["mesh.kuma.name"]; val != "" {
-		mon.Name = val
-	}
-	if val := labels["mesh.kuma.url"]; val != "" {
-		mon.URL = val
-	}
-	if val := labels["mesh.kuma.description"]; val != "" {
-		mon.Description = &val
+	mon.URL = resolvedURL
+	if name := c.getMeshLabel(svc, router.Name, "name"); name != "" {
+		mon.Name = name
+	} else {
+		mon.Name = fmt.Sprintf("%s (%s)", svc.ContainerName, router.Name)
 	}
 
-	// Advanced 
-	if val := labels["mesh.kuma.method"]; val != "" {
+	// Advanced configuration mapping
+	if val := c.getMeshLabel(svc, router.Name, "description"); val != "" {
+        mon.Description = &val
+    }
+	if val := c.getMeshLabel(svc, router.Name, "method"); val != "" {
 		mon.Method = strings.ToUpper(val)
 	}
-	if val := labels["mesh.kuma.body"]; val != "" {
+	if val := c.getMeshLabel(svc, router.Name, "body"); val != "" {
 		mon.Body = val
 	}
-	if val := labels["mesh.kuma.headers"]; val != "" {
+	if val := c.getMeshLabel(svc, router.Name, "headers"); val != "" {
 		mon.Headers = val
 	}
-	if val := labels["mesh.kuma.basic_auth_user"]; val != "" {
+	if val := c.getMeshLabel(svc, router.Name, "basic_auth_user"); val != "" {
 		mon.BasicAuthUser = val
 	}
-	if val := labels["mesh.kuma.basic_auth_pass"]; val != "" {
+	if val := c.getMeshLabel(svc, router.Name, "basic_auth_pass"); val != "" {
 		mon.BasicAuthPass = val
 	}
-
-	if val := labels["mesh.kuma.ignore_tls"]; val != "" {
+	if val := c.getMeshLabel(svc, router.Name, "ignore_tls"); val != "" {
 		mon.IgnoreTLS = strings.ToLower(val) == "true"
 	}
-	if val := labels["mesh.kuma.upside_down"]; val != "" {
+	if val := c.getMeshLabel(svc, router.Name, "upside_down"); val != "" {
 		mon.UpsideDown = strings.ToLower(val) == "true"
 	}
-
-	if val := labels["mesh.kuma.interval"]; val != "" {
+	if val := c.getMeshLabel(svc, router.Name, "interval"); val != "" {
 		if i, err := strconv.ParseInt(val, 10, 64); err == nil {
 			mon.Interval = i
 		}
 	}
-	if val := labels["mesh.kuma.retry_interval"]; val != "" {
+	if val := c.getMeshLabel(svc, router.Name, "retry_interval"); val != "" {
 		if i, err := strconv.ParseInt(val, 10, 64); err == nil {
 			mon.RetryInterval = i
 		}
 	}
-	if val := labels["mesh.kuma.max_retries"]; val != "" {
+	if val := c.getMeshLabel(svc, router.Name, "max_retries"); val != "" {
 		if i, err := strconv.ParseInt(val, 10, 64); err == nil {
 			mon.MaxRetries = i
 		}
 	}
-	if val := labels["mesh.kuma.resend_interval"]; val != "" {
-		if i, err := strconv.ParseInt(val, 10, 64); err == nil {
-			mon.ResendInterval = i
-		}
-	}
-	if val := labels["mesh.kuma.timeout"]; val != "" {
-		if i, err := strconv.ParseInt(val, 10, 64); err == nil {
-			mon.Timeout = i
-		}
-	}
-	if val := labels["mesh.kuma.max_redirects"]; val != "" {
-		if i, err := strconv.Atoi(val); err == nil {
-			mon.MaxRedirects = i
-		}
-	}
-
-	if val := labels["mesh.kuma.accepted_status_codes"]; val != "" {
+	if val := c.getMeshLabel(svc, router.Name, "accepted_status_codes"); val != "" {
 		rawCodes := strings.Split(val, ",")
 		cleanCodes := make([]string, 0, len(rawCodes))
 		for _, code := range rawCodes {
@@ -312,13 +339,73 @@ func (c *Client) buildHTTPMonitor(svc core.Service) *monitor.HTTP {
 	return mon
 }
 
-// Check if Kuma is enabled
-func (c *Client) isEnabled(svc core.Service) bool {
-	enabled := c.cfg.AutoEnable
-	if val, ok := svc.Labels["mesh.kuma.enable"]; ok {
-		enabled = strings.ToLower(val) == "true"
+// getMeshLabel handles the hierarchy: Router Override > Global Service Label
+func (c *Client) getMeshLabel(svc core.Service, routerName string, key string) string {
+	// Highest Priority: Router-specific Kuma key (e.g., traefik.http.routers.my-router.mesh.kuma.enable)
+	routerKumaKey := fmt.Sprintf("traefik.http.routers.%s.mesh.kuma.%s", routerName, key)
+	if val, ok := svc.Labels[routerKumaKey]; ok {
+		return val
 	}
-	return enabled
+
+	// Priority 2: Router-specific Generic key (e.g., traefik.http.routers.my-router.mesh.managed)
+	routerMeshKey := fmt.Sprintf("traefik.http.routers.%s.mesh.%s", routerName, key)
+	if val, ok := svc.Labels[routerMeshKey]; ok {
+		return val
+	}
+
+	// Priority 3: Global Kuma key (e.g., mesh.kuma.enable)
+	globalKumaKey := fmt.Sprintf("mesh.kuma.%s", key)
+	if val, ok := svc.Labels[globalKumaKey]; ok {
+		return val
+	}
+
+	// Lowest Priority: Global Generic key (e.g., mesh.managed)
+	globalMeshKey := fmt.Sprintf("mesh.%s", key)
+	if val, ok := svc.Labels[globalMeshKey]; ok {
+		return val
+	}
+
+	return ""
+}
+
+// resolveMonitorURL purely handles AST parsing and relative/absolute overrides
+func (c *Client) resolveMonitorURL(svc core.Service, router Router) string {
+	hosts, paths := traefik.ParseRule(router.Rule)
+	basePath := ""
+	if len(paths) > 0 {
+		basePath = paths[0]
+	}
+	
+	detectedURL := ""
+	if len(hosts) > 0 {
+		detectedURL = "https://" + hosts[0] + basePath
+	} else if len(svc.Hosts) > 0 {
+		detectedURL = "https://" + svc.Hosts[0]
+	}
+
+	if urlOverride := c.getMeshLabel(svc, router.Name, "url"); urlOverride != "" {
+		if strings.HasPrefix(urlOverride, "/") {
+			// Relative Override (e.g. "/health")
+			return strings.TrimRight(detectedURL, "/") + urlOverride
+		}
+		// Absolute Override (e.g. "https://api.com")
+		return urlOverride
+	}
+	
+	return detectedURL
+}
+
+// Check if Kuma is enabled for this router
+func (c *Client) isEnabled(svc core.Service, routerName string) bool {
+	// Check specific 'enable' first
+	if val := c.getMeshLabel(svc, routerName, "enable"); val != "" {
+		return strings.ToLower(val) == "true"
+	}
+	// Fall back to generic 'managed'
+	if val := c.getMeshLabel(svc, routerName, "managed"); val != "" {
+		return strings.ToLower(val) == "true"
+	}
+	return c.cfg.AutoEnable
 }
 
 // Helper to format slugs
@@ -330,4 +417,25 @@ func formatTitleFromSlug(slug string) string {
 		}
 	}
 	return strings.Join(parts, " ")
+}
+
+// Helper to extract routers dynamically from labels so we don't need to modify core.Service
+func extractRouters(labels map[string]string) []Router {
+	var routers []Router
+	for k, v := range labels {
+		if strings.HasPrefix(k, "traefik.http.routers.") && strings.HasSuffix(k, ".rule") {
+			parts := strings.Split(k, ".")
+			if len(parts) >= 5 {
+				routers = append(routers, Router{
+					Name: parts[3],
+					Rule: v,
+				})
+			}
+		}
+	}
+	// If no routers found, create a dummy one so the global processing loop still runs for "worker" containers
+	if len(routers) == 0 {
+		routers = append(routers, Router{Name: "default", Rule: ""})
+	}
+	return routers
 }
