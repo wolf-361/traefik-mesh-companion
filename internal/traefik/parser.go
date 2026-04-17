@@ -2,6 +2,7 @@ package traefik
 
 import (
 	"log/slog"
+	"strings"
 
 	"github.com/traefik/traefik/v3/pkg/rules"
 )

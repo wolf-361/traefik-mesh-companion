@@ -238,6 +238,10 @@ func (c *Client) Process(services []core.Service) error {
                     cycleURLs[dedupeKey] = monitorID
                     return nil
                 }, "name", httpMonitor.Name)
+
+				if err != nil {
+                    continue 
+                }
             } else {
 				slog.Debug("Monitor already exists for URL, skipping creation", "url", monitorURL)
 			}
