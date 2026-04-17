@@ -124,37 +124,60 @@ func (m *StatusPageManager) attachToGroup(ctx context.Context, page *statuspage.
 		page.PublicGroupList = cached
 	}
 
+	changed := false
 	targetIdx := -1
-	for i, g := range page.PublicGroupList {
-		if strings.EqualFold(g.Name, groupName) {
-			targetIdx = i
-			break
-		}
-	}
 
-	if targetIdx == -1 {
-		page.PublicGroupList = append(page.PublicGroupList, statuspage.PublicGroup{
-			Name:   groupName,
-			Weight: len(page.PublicGroupList) + 1,
-		})
-		targetIdx = len(page.PublicGroupList) - 1
-	}
+	// Find target index and PRUNE monitor from all other groups
+    for i := range page.PublicGroupList {
+        group := &page.PublicGroupList[i]
+        
+        if strings.EqualFold(group.Name, groupName) {
+            targetIdx = i
+            continue
+        }
 
-	group := &page.PublicGroupList[targetIdx]
-	for _, mon := range group.MonitorList {
-		if mon.ID == monitorID {
-			return // Already attached
-		}
-	}
+        // Remove monitor if it exists in a different group
+        for j, mon := range group.MonitorList {
+            if mon.ID == monitorID {
+                group.MonitorList = append(group.MonitorList[:j], group.MonitorList[j+1:]...)
+                changed = true
+                break
+            }
+        }
+    }
 
-	group.MonitorList = append(group.MonitorList, statuspage.PublicMonitor{ID: monitorID})
-	updated, err := m.client.SaveStatusPage(ctx, page)
-	if err != nil {
-		slog.Error("Failed to attach monitor to status page", "monitor", monitorName, "error", err)
-	} else {
-		// Update the cache with the new group state (including IDs)
-		m.pageGroupsCache[page.Slug] = updated
-	}
+    // Create group if it doesn't exist
+    if targetIdx == -1 {
+        page.PublicGroupList = append(page.PublicGroupList, statuspage.PublicGroup{
+            Name:   groupName,
+            Weight: len(page.PublicGroupList) + 1,
+        })
+        targetIdx = len(page.PublicGroupList) - 1
+        changed = true
+    }
+
+    // Add to target group if not already there
+    existsInTarget := false
+    for _, mon := range page.PublicGroupList[targetIdx].MonitorList {
+        if mon.ID == monitorID {
+            existsInTarget = true
+            break
+        }
+    }
+
+    if !existsInTarget {
+        page.PublicGroupList[targetIdx].MonitorList = append(page.PublicGroupList[targetIdx].MonitorList, statuspage.PublicMonitor{ID: monitorID})
+        changed = true
+    }
+
+    if changed {
+        updated, err := m.client.SaveStatusPage(ctx, page)
+        if err != nil {
+            slog.Error("Failed to update status page layout", "page", page.Slug, "error", err)
+        } else {
+            m.pageGroupsCache[page.Slug] = updated
+        }
+    }
 }
 
 func (m *StatusPageManager) getPagesFromLabels(labels map[string]string) map[string]string {

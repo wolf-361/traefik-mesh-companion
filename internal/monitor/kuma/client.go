@@ -211,19 +211,18 @@ func (c *Client) Process(services []core.Service) error {
 			}
 
 			var monitorID int64
-			var exists bool
-			allowDupes := strings.ToLower(c.getMeshLabel(svc, router.Name, "allow_duplicates")) == "true"
-
-			if allowDupes {
-				// Fallback to legacy URL+Name tracking
-				monitorID, exists = c.tracked[monitorURL+httpMonitor.Name]
-			} else {
-				// Check global state first, then current cycle state
-				monitorID, exists = c.trackedURLs[monitorURL]
-				if !exists {
-					monitorID, exists = cycleURLs[monitorURL]
-				}
-			}
+            var exists bool
+            
+            dedupeKey := monitorURL + svc.ContainerName
+            
+            if strings.ToLower(c.getMeshLabel(svc, router.Name, "allow_duplicates")) == "true" {
+                monitorID, exists = c.tracked[monitorURL+httpMonitor.Name]
+            } else {
+                monitorID, exists = c.trackedURLs[dedupeKey]
+                if !exists {
+                    monitorID, exists = cycleURLs[dedupeKey]
+                }
+            }
 
 			// If it doesn't exist, create it
 			if !exists {
@@ -235,16 +234,15 @@ func (c *Client) Process(services []core.Service) error {
 					monitorID = createdMon
 					
 					// Cache it so subsequent routers in this cycle don't recreate it
-					c.trackedURLs[monitorURL] = monitorID
-					c.tracked[monitorURL+httpMonitor.Name] = monitorID
-					cycleURLs[monitorURL] = monitorID
-					return nil
-				}, "name", httpMonitor.Name)
-				
+					c.trackedURLs[dedupeKey] = monitorID
+                    cycleURLs[dedupeKey] = monitorID
+                    return nil
+                }, "name", httpMonitor.Name)
+
 				if err != nil {
-					continue
-				}
-			} else {
+                    continue 
+                }
+            } else {
 				slog.Debug("Monitor already exists for URL, skipping creation", "url", monitorURL)
 			}
 

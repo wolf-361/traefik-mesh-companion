@@ -2,6 +2,7 @@ package traefik
 
 import (
 	"log/slog"
+	"strings"
 
 	"github.com/traefik/traefik/v3/pkg/rules"
 )
@@ -38,18 +39,17 @@ func ParseRule(ruleStr string) ([]string, []string) {
 	var paths []string
 
 	// Recursively walk the AST branches to pull out values
-	var walk func(t *rules.Tree)
-	walk = func(t *rules.Tree) {
-		if t == nil {
-			return
-		}
+    var walk func(t *rules.Tree)
+    walk = func(t *rules.Tree) {
+        if t == nil { return }
 
-		if t.Matcher == "Host" {
-			hosts = append(hosts, t.Value...)
-		}
-		if t.Matcher == "PathPrefix" || t.Matcher == "Path" {
-			paths = append(paths, t.Value...)
-		}
+		m := strings.ToLower(t.Matcher)
+        if m == "host" {
+            hosts = append(hosts, t.Value...)
+        }
+        if m == "pathprefix" || m == "path" {
+            paths = append(paths, t.Value...)
+        }
 
 		// Traverse down logical operators
 		walk(t.RuleLeft)
@@ -57,6 +57,5 @@ func ParseRule(ruleStr string) ([]string, []string) {
 	}
 
 	walk(tree)
-
 	return hosts, paths
 }
