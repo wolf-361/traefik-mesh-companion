@@ -1,61 +1,53 @@
 package traefik
 
 import (
-	"log/slog"
+	"regexp"
 	"strings"
+)
 
-	"github.com/traefik/traefik/v3/pkg/rules"
+var (
+	// These lazy matchers safely extract anything inside the parentheses
+	hostRegex       = regexp.MustCompile(`(?i)Host\((.*?)\)`)
+	pathPrefixRegex = regexp.MustCompile(`(?i)PathPrefix\((.*?)\)`)
+	pathRegex       = regexp.MustCompile(`(?i)Path\((.*?)\)`)
 )
 
 // ParseRule takes a raw Traefik router rule string and extracts all Hosts and PathPrefixes.
-// It uses Traefik's native AST parser so it perfectly handles complex logic like && and ||.
+// It uses a lightweight regex engine to avoid importing Traefik's internal AST,
+// keeping the companion fast, robust, and completely independent.
 func ParseRule(ruleStr string) ([]string, []string) {
 	if ruleStr == "" {
-		return nil, nil
-	}
-
-	// Initialize Traefik's official parser with the matchers we care about
-	parser, err := rules.NewParser([]string{
-		"Host", "HostRegexp", "Path", "PathPrefix", "PathRegexp", "Headers", "Method", "Query",
-	})
-	if err != nil {
-		slog.Error("Failed to initialize Traefik AST parser", "error", err)
-		return nil, nil
-	}
-
-	// Parse the string into an Abstract Syntax Tree (AST)
-	parsedRaw, err := parser.Parse(ruleStr)
-	if err != nil {
-		slog.Warn("Failed to parse Traefik rule", "rule", ruleStr, "error", err)
-		return nil, nil
-	}
-
-	tree, ok := parsedRaw.(*rules.Tree)
-	if !ok {
 		return nil, nil
 	}
 
 	var hosts []string
 	var paths []string
 
-	// Recursively walk the AST branches to pull out values
-    var walk func(t *rules.Tree)
-    walk = func(t *rules.Tree) {
-        if t == nil { return }
+	hosts = append(hosts, extractValues(hostRegex, ruleStr)...)
+	paths = append(paths, extractValues(pathPrefixRegex, ruleStr)...)
+	paths = append(paths, extractValues(pathRegex, ruleStr)...)
 
-		m := strings.ToLower(t.Matcher)
-        if m == "host" {
-            hosts = append(hosts, t.Value...)
-        }
-        if m == "pathprefix" || m == "path" {
-            paths = append(paths, t.Value...)
-        }
-
-		// Traverse down logical operators
-		walk(t.RuleLeft)
-		walk(t.RuleRight)
-	}
-
-	walk(tree)
 	return hosts, paths
+}
+
+// extractValues finds all matches, splits them by comma, and cleans up the syntax
+func extractValues(re *regexp.Regexp, ruleStr string) []string {
+	var results []string
+	matches := re.FindAllStringSubmatch(ruleStr, -1)
+
+	for _, match := range matches {
+		if len(match) > 1 {
+			// e.g., match[1] = "`app.local`, `app.remote`"
+			parts := strings.Split(match[1], ",")
+			for _, part := range parts {
+				// Remove spaces, backticks, and quotes
+				clean := strings.TrimSpace(part)
+				clean = strings.Trim(clean, "`'\"")
+				if clean != "" {
+					results = append(results, clean)
+				}
+			}
+		}
+	}
+	return results
 }
