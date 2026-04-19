@@ -3,7 +3,6 @@ package watcher
 import (
 	"context"
 	"log/slog"
-	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -14,13 +13,19 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/wolf-361/traefik-mesh-companion/internal/config"
 	"github.com/wolf-361/traefik-mesh-companion/internal/core"
+	"github.com/wolf-361/traefik-mesh-companion/internal/traefik"
 )
 
+// DockerClient is an interface that allows us to mock the Docker socket during testing
+type DockerClient interface {
+	ContainerList(ctx context.Context, options container.ListOptions) ([]container.Summary, error)
+	Events(ctx context.Context, options events.ListOptions) (<-chan events.Message, <-chan error)
+}
+
 type Watcher struct {
-	cli        *client.Client
+	cli        DockerClient
 	cfg        *config.Config
 	processors []core.Processor
-	hostRegex  *regexp.Regexp
 	isHealthy  *atomic.Bool
 }
 
@@ -34,12 +39,11 @@ func NewWatcher(cfg *config.Config, processors []core.Processor, isHealthy *atom
 		cli:        cli,
 		cfg:        cfg,
 		processors: processors,
-		hostRegex:  regexp.MustCompile(`Host\([` + "`" + `'](.+?)[` + "`" + `']\)`),
 		isHealthy:  isHealthy,
 	}, nil
 }
 
-func (w *Watcher) Start() {
+func (w *Watcher) Start(ctx context.Context) {
 	slog.Info("Starting Docker socket watcher...")
 	w.SyncAll()
 
@@ -52,14 +56,19 @@ func (w *Watcher) Start() {
 	eventFilter.Add("event", "die")
 	eventFilter.Add("event", "destroy")
 
-	msgs, errs := w.cli.Events(context.Background(), events.ListOptions{Filters: eventFilter})
+	msgs, errs := w.cli.Events(ctx, events.ListOptions{Filters: eventFilter})
 
 	for {
 		select {
+		case <-ctx.Done(): // <-- The Kill Switch for tests and graceful shutdowns!
+			slog.Info("Stopping Docker watcher gracefully")
+			return
 		case err := <-errs:
-			slog.Error("Docker event stream error", "error", err)
-			w.isHealthy.Store(false)
-			time.Sleep(5 * time.Second)
+			if err != nil {
+				slog.Error("Docker event stream error", "error", err)
+				w.isHealthy.Store(false)
+				time.Sleep(1 * time.Second) // Prevent log spam
+			}
 		case msg := <-msgs:
 			slog.Info("Container event triggered sync", "container", msg.Actor.Attributes["name"], "action", msg.Action)
 			w.SyncAll()
@@ -88,23 +97,18 @@ func (w *Watcher) SyncAll() {
 		}
 
 		svc := core.Service{
-			ContainerName: strings.TrimPrefix(c.Names[0], "/"),
+			// Safely handle missing names
+			ContainerName: "unknown",
 			Labels:        c.Labels,
+		}
+		if len(c.Names) > 0 {
+			svc.ContainerName = strings.TrimPrefix(c.Names[0], "/")
 		}
 
 		for key, val := range c.Labels {
 			if strings.HasPrefix(key, "traefik.http.routers.") && strings.HasSuffix(key, ".rule") {
-				matches := w.hostRegex.FindAllStringSubmatch(val, -1)
-				for _, match := range matches {
-					if len(match) > 1 {
-						for _, domain := range strings.Split(match[1], ",") {
-							cleanDomain := strings.Trim(strings.TrimSpace(domain), "`'\"")
-							if cleanDomain != "" {
-								svc.Hosts = append(svc.Hosts, cleanDomain)
-							}
-						}
-					}
-				}
+				hosts, _ := traefik.ParseRule(val)
+				svc.Hosts = append(svc.Hosts, hosts...)
 			}
 		}
 		services = append(services, svc)

@@ -167,7 +167,7 @@ func main() {
 		}
 	}()
 
-	go w.Start()
+	go w.Start(context.Background())
 
 	// --- Graceful Shutdown ---
 	stopChan := make(chan os.Signal, 1)

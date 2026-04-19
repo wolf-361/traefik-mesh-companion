@@ -179,7 +179,7 @@ func TestResolveMonitorURL(t *testing.T) {
 			},
 			router: Router{Name: "web", Rule: "Host(`web.local`) && PathPrefix(`/v1`)"},
 			// Even if Traefik drops the /v1 in the test, it should append correctly to the base
-			expected: "https://web.local/healthz",
+			expected: "https://web.local/v1/healthz",
 		},
 	}
 

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/wolf-361/traefik-mesh-companion/internal/core"
+	"github.com/wolf-361/traefik-mesh-companion/internal/traefik"
 )
 
 var _ core.Processor = (*Client)(nil)
@@ -97,26 +98,28 @@ func (c *Client) Process(services []core.Service) error {
 			continue
 		}
 
-		payload := c.buildPayload(svc)
+		routers := extractRouters(svc.Labels)
+		for _, router := range routers {
+			payload := c.buildPayload(svc, router)
 
-		if payload.URL == "" || payload.URL == "https://" {
-			continue
-		}
+			if payload.URL == "" || payload.URL == "https://" {
+				continue
+			}
 
-		cacheKey := payload.Group + "/" + payload.Name
-		activeKeys[cacheKey] = true
+			cacheKey := payload.Group + "/" + payload.Name
+			activeKeys[cacheKey] = true
 
-		if c.tracked[cacheKey] {
-			continue
-		}
+			if c.tracked[cacheKey] {
+				continue
+			}
 
-		if err := c.AddEndpoint(payload); err == nil {
-			c.tracked[cacheKey] = true
+			if err := c.AddEndpoint(payload); err == nil {
+				c.tracked[cacheKey] = true
+			}
 		}
 	}
 
 	// --- ORPHAN CLEANUP LOGIC ---
-	// If it's in c.tracked but not in activeKeys, the container died!
 	for trackedKey := range c.tracked {
 		if !activeKeys[trackedKey] {
 			parts := strings.SplitN(trackedKey, "/", 2)
@@ -132,35 +135,11 @@ func (c *Client) Process(services []core.Service) error {
 	return nil
 }
 
-// --- RESTORED 1.0.0 ADVANCED STRUCTS ---
-type GatusEndpoint struct {
-	Name       string            `json:"name"`
-	Group      string            `json:"group"`
-	URL        string            `json:"url"`
-	Method     string            `json:"method"`
-	Interval   string            `json:"interval"`
-	Conditions []string          `json:"conditions"`
-	Headers    map[string]string `json:"headers,omitempty"`
-	Body       string            `json:"body,omitempty"`
-	Client     *GatusClient      `json:"client,omitempty"`
-	UI         *GatusUI          `json:"ui,omitempty"`
-}
-
-type GatusClient struct {
-	Insecure bool `json:"insecure"`
-}
-
-type GatusUI struct {
-	HideHostname bool   `json:"hideHostname,omitempty"`
-	HideURL      bool   `json:"hideURL,omitempty"`
-	Description  string `json:"description,omitempty"`
-}
-
-func (c *Client) buildPayload(svc core.Service) GatusEndpoint {
+func (c *Client) buildPayload(svc core.Service, router Router) GatusEndpoint {
 	labels := svc.Labels
 
 	payload := GatusEndpoint{
-		Name:     svc.ContainerName,
+		Name:     fmt.Sprintf("%s-%s", svc.ContainerName, router.Name),
 		Group:    "Infrastructure",
 		Method:   "GET",
 		Interval: "60s",
@@ -170,7 +149,15 @@ func (c *Client) buildPayload(svc core.Service) GatusEndpoint {
 		},
 	}
 
-	if len(svc.Hosts) > 0 {
+	hosts, paths := traefik.ParseRule(router.Rule)
+	basePath := ""
+	if len(paths) > 0 {
+		basePath = paths[0]
+	}
+
+	if len(hosts) > 0 {
+		payload.URL = "https://" + hosts[0] + basePath
+	} else if len(svc.Hosts) > 0 {
 		payload.URL = "https://" + svc.Hosts[0]
 	}
 
@@ -181,7 +168,12 @@ func (c *Client) buildPayload(svc core.Service) GatusEndpoint {
 		payload.Group = val
 	}
 	if val := labels["mesh.gatus.url"]; val != "" {
-		payload.URL = val
+		// Relative url is appended to the host, absolute url replaces it
+		if strings.HasPrefix(val, "/") {
+			payload.URL = strings.TrimRight(payload.URL, "/") + val
+		} else {
+			payload.URL = val
+		}
 	}
 	if val := labels["mesh.gatus.method"]; val != "" {
 		payload.Method = strings.ToUpper(val)
