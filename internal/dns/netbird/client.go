@@ -7,12 +7,12 @@ import (
 	"log/slog"
 	"net/http"
 	"reflect"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/wolf-361/traefik-mesh-companion/internal/config"
 	"github.com/wolf-361/traefik-mesh-companion/internal/core"
+	"github.com/wolf-361/traefik-mesh-companion/internal/traefik"
 )
 
 // Ensure Client implements the core.Processor interface at compile time
@@ -26,9 +26,6 @@ type Client struct {
 	httpClient *http.Client
 	zoneMap    map[string]string
 
-	filterRegex *regexp.Regexp
-	hostRegex   *regexp.Regexp
-
 	lastHosts   map[string]bool
 	lastIgnored map[string]bool
 }
@@ -41,22 +38,13 @@ func New(pipelineCfg *config.Pipeline, exec *core.Executor) *Client {
 		return nil
 	}
 
-	c := &Client{
+	return &Client{
 		nbCfg:       nbCfg,
 		pipelineCfg: pipelineCfg,
 		exec:        exec,
 		httpClient:  &http.Client{Timeout: 10 * time.Second},
 		zoneMap:     make(map[string]string),
-		hostRegex:   regexp.MustCompile(`Host\([` + "`" + `'](.+?)[` + "`" + `']\)`),
 	}
-
-	if pipelineCfg.FilterLabel != "" {
-		escaped := regexp.QuoteMeta(pipelineCfg.FilterLabel)
-		pattern := "^" + strings.ReplaceAll(escaped, "\\*", "([^.]+)") + "$"
-		c.filterRegex = regexp.MustCompile(pattern)
-	}
-
-	return c
 }
 
 func (c *Client) Name() string { return "NetBird" }
@@ -96,14 +84,36 @@ func (c *Client) Init() error {
 }
 
 func (c *Client) Process(services []core.Service) error {
+	// Check if config exists before doing any work
+	if c.nbCfg == nil {
+		return nil
+	}
+
+	// Use our pure function to extract the routing state
+	activeHosts, ignoredHosts := extractMeshHosts(services)
+
+	// Compare state and trigger API calls only if changed
+	if !reflect.DeepEqual(c.lastHosts, activeHosts) || !reflect.DeepEqual(c.lastIgnored, ignoredHosts) {
+		err := c.Sync(activeHosts, ignoredHosts, c.nbCfg.Target, c.pipelineCfg.Cleanup)
+		if err == nil {
+			c.lastHosts = activeHosts
+			c.lastIgnored = ignoredHosts
+		}
+		return err
+	}
+
+	return nil
+}
+
+// extractMeshHosts is a pure function that translates Traefik rules into DNS targets
+func extractMeshHosts(services []core.Service) (map[string]bool, map[string]bool) {
 	activeHosts := make(map[string]bool)
 	ignoredHosts := make(map[string]bool)
 
 	for _, svc := range services {
 		type routerData struct {
-			rule      string
-			managed   string
-			filterVal string
+			rule    string
+			managed string
 		}
 		routers := make(map[string]*routerData)
 
@@ -121,12 +131,7 @@ func (c *Client) Process(services []core.Service) error {
 			}
 			if strings.HasPrefix(key, "traefik.http.routers.") && strings.HasSuffix(key, ".mesh.managed") {
 				name := strings.TrimSuffix(strings.TrimPrefix(key, "traefik.http.routers."), ".mesh.managed")
-				getRouter(name).managed = val
-			}
-			if c.filterRegex != nil {
-				if matches := c.filterRegex.FindStringSubmatch(key); len(matches) > 1 {
-					getRouter(matches[1]).filterVal = val
-				}
+				getRouter(name).managed = strings.ToLower(val)
 			}
 		}
 
@@ -135,24 +140,21 @@ func (c *Client) Process(services []core.Service) error {
 				continue
 			}
 
-			if c.matchFilter(data.filterVal, c.pipelineCfg.FilterValue) {
+			hosts, _ := traefik.ParseRule(data.rule)
+			if len(hosts) == 0 && len(svc.Hosts) > 0 {
+				hosts = svc.Hosts
+			}
+
+			for _, host := range hosts {
 				if data.managed != "false" {
-					c.extractDomains(data.rule, activeHosts)
+					activeHosts[host] = true
 				} else {
-					c.extractDomains(data.rule, ignoredHosts)
+					ignoredHosts[host] = true
 				}
 			}
 		}
 	}
-
-	if !reflect.DeepEqual(c.lastHosts, activeHosts) || !reflect.DeepEqual(c.lastIgnored, ignoredHosts) {
-		err := c.Sync(activeHosts, ignoredHosts, c.nbCfg.Target, c.pipelineCfg.Cleanup)
-		c.lastHosts = activeHosts
-		c.lastIgnored = ignoredHosts
-		return err
-	}
-
-	return nil
+	return activeHosts, ignoredHosts
 }
 
 func (c *Client) Sync(activeHosts map[string]bool, ignoredHosts map[string]bool, targetIP string, cleanup bool) error {
@@ -248,31 +250,6 @@ func (c *Client) syncZone(zoneID string, activeHosts map[string]bool, ignoredHos
 }
 
 // --- Helpers ---
-
-func (c *Client) extractDomains(rule string, targetMap map[string]bool) {
-	matches := c.hostRegex.FindAllStringSubmatch(rule, -1)
-	for _, match := range matches {
-		if len(match) > 1 {
-			domains := strings.Split(match[1], ",")
-			for _, domain := range domains {
-				cleanDomain := strings.Trim(strings.TrimSpace(domain), "`'\"")
-				if cleanDomain != "" {
-					targetMap[cleanDomain] = true
-				}
-			}
-		}
-	}
-}
-
-func (c *Client) matchFilter(labelValue string, envFilter string) bool {
-	for _, f := range strings.Split(envFilter, ",") {
-		cleanFilter := strings.TrimSpace(f)
-		if cleanFilter != "" && strings.Contains(labelValue, cleanFilter) {
-			return true
-		}
-	}
-	return false
-}
 
 func (c *Client) upsertRecord(method, recordID, host, ip, zoneID string) {
 	action := "create NetBird record"
