@@ -22,9 +22,9 @@ jobs:
     steps:
       - name: Generate Bot Token
         id: generate-token
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@v4
         with:
-          app-id: ${{ secrets.BOT_APP_ID }}
+          client-id: ${{ secrets.BOT_APP_ID }}
           private-key: ${{ secrets.BOT_PRIVATE_KEY }}
           
       - name: Checkout Code
@@ -62,14 +62,17 @@ jobs:
         run: |
           git config --global user.name "Wolf-Infrastructure-Bot[bot]"
           git config --global user.email "Wolf-Infrastructure-Bot[bot]@users.noreply.github.com"
+
+          git add README.md
           
-          if git diff --quiet README.md; then
-            echo "No changes to README."
-          else
-            git add README.md
+          if ! git diff --staged --quiet; then
             git commit -m "docs: automate badge updates [skip ci]"
             git remote set-url origin https://x-access-token:${{ steps.generate-token.outputs.token }}@github.com/${{ github.repository }}.git
-            git push origin main
+            
+            # 3. Push from HEAD to main to completely avoid detached HEAD errors
+            git push origin HEAD:main
+          else
+            echo "No changes to README. Skipping commit."
           fi
 
   create-release:
