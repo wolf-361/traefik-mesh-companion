@@ -19,14 +19,14 @@ The companion operates using a multi-pipeline capability architecture, allowing 
 4. **Distributed Coordinator:** Operates in a Server/Client topology to prevent API race conditions when managing Uptime Kuma UI states across multiple edge nodes simultaneously.
 
 ## Features
-* **Zero-Config Auto-Discovery via AST:** Natively parses complex Traefik routing rules (including nested `Host`, `PathPrefix`, `&&`, and `||` logic) into an Abstract Syntax Tree to automatically build pixel-perfect monitor URLs.
+* **Zero-Config Auto-Discovery Engine:** Employs a lightweight, pure-Go regular expression engine to natively parse complex Traefik routing rules (including nested `Host`, `PathPrefix`, `&&`, and `||` logic). By completely omitting Traefik's internal packages, the binary remains ultra-small and permanently immune to upstream version-breaking changes.
+* **Rock-Solid State Management:** Built on a pure-function architecture with 100% test coverage on its core logic, guaranteeing no "state amnesia" or duplicate configurations during sync intervals.
 * **Global URL Deduplication:** Smartly evaluates generated endpoints across all containers. If multiple Traefik routers resolve to the exact same URL, the companion groups them into a single Uptime Kuma monitor to prevent API spam.
 * **Dynamic Status Pages & Domain Binding:** Automatically provisions Uptime Kuma Status Pages and Groups on the fly. You can dynamically bind Traefik router domains directly to Uptime Kuma Status Pages using a single label.
 * **Smart Auto-Color Tagging:** Automatically injects UI tags (like the server hostname) into Uptime Kuma monitors, utilizing a deterministic hash (`djb2`) to assign distinct, repeatable colors across your mesh without manual configuration.
 * **Safe Orphan Cleanup:** Automatically removes stale DNS records when containers are destroyed, protected by a strict Target Lock to prevent accidental deletion of manually managed records.
 * **Traefik-Safe Overrides:** Fine-tune specific routers (custom paths like `/health`, intervals, expected status codes) using a custom `mesh.routers.*` namespace that bypasses Traefik's strict schema validator.
-* **Highly Optimized Execution:** Safely supports synchronization intervals as low as 60 seconds. The watcher engine employs in-memory state caching to eliminate unnecessary API calls.
-* **Ultra-Low Footprint:** Compiled as a statically linked Go binary running in a distroless `scratch` container.
+* **Ultra-Low Footprint:** Compiled as a statically linked Go binary running in a distroless `scratch` container, equipped with a native Liveness probe to prevent crash-loops during temporary API outages.
 
 ## Quick Start (Docker Compose)
 
