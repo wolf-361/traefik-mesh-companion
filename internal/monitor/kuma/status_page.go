@@ -43,7 +43,7 @@ func (m *StatusPageManager) ProcessStatusPages(ctx context.Context, monitorID in
 // SyncState populates the local cache and enforces global domain mapping
 func (m *StatusPageManager) SyncState(ctx context.Context) error {
 	slog.Info("Syncing status page groups from Uptime Kuma...")
-	
+
 	pages, err := m.client.GetStatusPages(ctx)
 	if err != nil {
 		return err
@@ -97,7 +97,7 @@ func (m *StatusPageManager) ensureDomainMapping(ctx context.Context, page *statu
 	if !found {
 		slog.Info("Enforcing domain mapping", "slug", page.Slug, "domain", cleanHost)
 		page.DomainNameList = append(page.DomainNameList, cleanHost)
-		
+
 		// Force group restoration before save to prevent wipe-out
 		if cached, ok := m.pageGroupsCache[page.Slug]; ok {
 			page.PublicGroupList = cached
@@ -128,61 +128,61 @@ func (m *StatusPageManager) attachToGroup(ctx context.Context, page *statuspage.
 	targetIdx := -1
 
 	// Find target index and PRUNE monitor from all other groups
-    for i := range page.PublicGroupList {
-        group := &page.PublicGroupList[i]
-        
-        if strings.EqualFold(group.Name, groupName) {
-            targetIdx = i
-            continue
-        }
+	for i := range page.PublicGroupList {
+		group := &page.PublicGroupList[i]
 
-        // Remove monitor if it exists in a different group
-        for j, mon := range group.MonitorList {
-            if mon.ID == monitorID {
-                group.MonitorList = append(group.MonitorList[:j], group.MonitorList[j+1:]...)
-                changed = true
-                break
-            }
-        }
-    }
+		if strings.EqualFold(group.Name, groupName) {
+			targetIdx = i
+			continue
+		}
 
-    // Create group if it doesn't exist
-    if targetIdx == -1 {
-        page.PublicGroupList = append(page.PublicGroupList, statuspage.PublicGroup{
-            Name:   groupName,
-            Weight: len(page.PublicGroupList) + 1,
-        })
-        targetIdx = len(page.PublicGroupList) - 1
-        changed = true
-    }
+		// Remove monitor if it exists in a different group
+		for j, mon := range group.MonitorList {
+			if mon.ID == monitorID {
+				group.MonitorList = append(group.MonitorList[:j], group.MonitorList[j+1:]...)
+				changed = true
+				break
+			}
+		}
+	}
 
-    // Add to target group if not already there
-    existsInTarget := false
-    for _, mon := range page.PublicGroupList[targetIdx].MonitorList {
-        if mon.ID == monitorID {
-            existsInTarget = true
-            break
-        }
-    }
+	// Create group if it doesn't exist
+	if targetIdx == -1 {
+		page.PublicGroupList = append(page.PublicGroupList, statuspage.PublicGroup{
+			Name:   groupName,
+			Weight: len(page.PublicGroupList) + 1,
+		})
+		targetIdx = len(page.PublicGroupList) - 1
+		changed = true
+	}
 
-    if !existsInTarget {
-        page.PublicGroupList[targetIdx].MonitorList = append(page.PublicGroupList[targetIdx].MonitorList, statuspage.PublicMonitor{ID: monitorID})
-        changed = true
-    }
+	// Add to target group if not already there
+	existsInTarget := false
+	for _, mon := range page.PublicGroupList[targetIdx].MonitorList {
+		if mon.ID == monitorID {
+			existsInTarget = true
+			break
+		}
+	}
 
-    if changed {
-        updated, err := m.client.SaveStatusPage(ctx, page)
-        if err != nil {
-            slog.Error("Failed to update status page layout", "page", page.Slug, "error", err)
-        } else {
-            m.pageGroupsCache[page.Slug] = updated
-        }
-    }
+	if !existsInTarget {
+		page.PublicGroupList[targetIdx].MonitorList = append(page.PublicGroupList[targetIdx].MonitorList, statuspage.PublicMonitor{ID: monitorID})
+		changed = true
+	}
+
+	if changed {
+		updated, err := m.client.SaveStatusPage(ctx, page)
+		if err != nil {
+			slog.Error("Failed to update status page layout", "page", page.Slug, "error", err)
+		} else {
+			m.pageGroupsCache[page.Slug] = updated
+		}
+	}
 }
 
 func (m *StatusPageManager) getPagesFromLabels(labels map[string]string) map[string]string {
 	pages := make(map[string]string)
-	
+
 	// Fallback group if none is specified
 	defaultGroup := "Services"
 	if val, ok := labels["mesh.kuma.group"]; ok && val != "" {
@@ -216,11 +216,4 @@ func (m *StatusPageManager) getPagesFromLabels(labels map[string]string) map[str
 		}
 	}
 	return pages
-}
-
-func (m *StatusPageManager) getGroupName(labels map[string]string) string {
-	if val, ok := labels["mesh.kuma.group"]; ok && val != "" {
-		return val
-	}
-	return "Services"
 }
