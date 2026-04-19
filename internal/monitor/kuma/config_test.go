@@ -1,25 +1,16 @@
 package kuma
 
 import (
-	"os"
 	"reflect"
 	"testing"
 )
 
 func TestGetEnvHelpers(t *testing.T) {
-	// Setup dummy environment variables for the test
-	os.Setenv("TEST_STRING", "hello_world")
-	os.Setenv("TEST_INT", "42")
-	os.Setenv("TEST_SLICE", "tag1, tag2 , tag3") // Note the weird spacing
+	t.Setenv("TEST_STRING", "hello_world")
+	t.Setenv("TEST_INT", "42")
+	t.Setenv("TEST_SLICE", "tag1, tag2 , tag3")
 
-	// Clean up after the test finishes
-	defer func() {
-		os.Unsetenv("TEST_STRING")
-		os.Unsetenv("TEST_INT")
-		os.Unsetenv("TEST_SLICE")
-	}()
-
-	//  Test Strings
+	// Test Strings
 	if val := getEnvString("TEST_STRING", "fallback"); val != "hello_world" {
 		t.Errorf("Expected 'hello_world', got '%s'", val)
 	}
