@@ -3,7 +3,7 @@ module github.com/wolf-361/traefik-mesh-companion
 go 1.26.1
 
 require (
-	github.com/breml/go-uptime-kuma-client v0.3.0
+	github.com/breml/go-uptime-kuma-client v0.3.3
 	github.com/cloudflare/cloudflare-go v0.116.0
 	github.com/docker/docker v28.5.2+incompatible
 )
