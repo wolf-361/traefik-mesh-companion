@@ -4,7 +4,7 @@ go 1.26.1
 
 require (
 	github.com/breml/go-uptime-kuma-client v0.3.3
-	github.com/cloudflare/cloudflare-go v0.116.0
+	github.com/cloudflare/cloudflare-go v0.117.0
 	github.com/docker/docker v28.5.2+incompatible
 )
 
